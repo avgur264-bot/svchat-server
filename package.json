@@ -11,6 +11,7 @@
     "node": "22.x"
   },
   "dependencies": {
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "web-push": "^3.6.7"
   }
 }
