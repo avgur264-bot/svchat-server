@@ -1,145 +1,95 @@
 /**
- * SVchat Realtime Server
- * Настоящий WebSocket-сервер: передаёт сообщения между живыми людьми в реальном времени.
- * Хранит последние сообщения в памяти (история чата для входящих).
- *
- * Запуск: node server.js  (порт из PORT или 8080)
+ * SVchat Realtime Server (Socket.IO)
+ * Надёжный обмен сообщениями в реальном времени.
+ * Socket.IO сам выбирает транспорт: сначала HTTP-polling (работает везде),
+ * затем повышает до WebSocket. Если WebSocket недоступен — остаётся на polling.
+ * Хранит последние сообщения в памяти (история комнаты).
  */
 const http = require('http')
-const { WebSocketServer } = require('ws')
+const { Server } = require('socket.io')
 
 const PORT = process.env.PORT || 8080
-const HISTORY_LIMIT = 200 // последних сообщений на комнату
+const HISTORY_LIMIT = 200
 
-// ── Хранилище в памяти ──────────────────────────────────────────────────────
-const rooms = new Map()      // roomId -> Set<ws>
 const history = new Map()    // roomId -> [messages]
-const users = new Map()      // ws -> { id, name, room }
+const roomUsers = new Map()  // roomId -> Map<socketId, {id, name}>
 
 function getHistory(room) {
   if (!history.has(room)) history.set(room, [])
   return history.get(room)
 }
-
-function broadcast(room, data, exclude = null) {
-  const clients = rooms.get(room)
-  if (!clients) return
-  const msg = JSON.stringify(data)
-  for (const client of clients) {
-    if (client !== exclude && client.readyState === 1) client.send(msg)
-  }
+function userList(room) {
+  const m = roomUsers.get(room)
+  return m ? [...m.values()] : []
 }
 
-function roomUserList(room) {
-  const clients = rooms.get(room)
-  if (!clients) return []
-  return [...clients].map(c => users.get(c)).filter(Boolean).map(u => ({ id: u.id, name: u.name }))
-}
-
-// ── HTTP (health-check для хостинга) ────────────────────────────────────────
 const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/') {
-    res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, rooms: rooms.size, online: users.size }))
-  } else {
-    res.writeHead(404); res.end()
-  }
+  res.writeHead(200, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  })
+  res.end(JSON.stringify({ ok: true, online: [...roomUsers.values()].reduce((n, m) => n + m.size, 0) }))
 })
 
-// ── WebSocket ───────────────────────────────────────────────────────────────
-const wss = new WebSocketServer({ server })
+const io = new Server(server, {
+  cors: { origin: '*', methods: ['GET', 'POST'] },
+  pingInterval: 25000,
+  pingTimeout: 20000,
+})
 
-wss.on('connection', (ws) => {
-  ws.isAlive = true
-  ws.on('pong', () => { ws.isAlive = true })
+io.on('connection', (socket) => {
+  let currentRoom = null
+  let me = null
 
-  ws.on('message', (raw) => {
-    let msg
-    try { msg = JSON.parse(raw) } catch { return }
-
-    switch (msg.type) {
-      // Вход в комнату: { type:'join', room, userId, name }
-      case 'join': {
-        const room = String(msg.room || 'general').slice(0, 64)
-        const user = { id: msg.userId || Math.random().toString(36).slice(2), name: String(msg.name || 'Гость').slice(0, 40), room }
-        users.set(ws, user)
-        if (!rooms.has(room)) rooms.set(room, new Set())
-        rooms.get(room).add(ws)
-
-        // Отправляем новичку историю + список участников
-        ws.send(JSON.stringify({ type: 'history', messages: getHistory(room) }))
-        ws.send(JSON.stringify({ type: 'users', users: roomUserList(room) }))
-        // Сообщаем остальным
-        broadcast(room, { type: 'user_joined', user: { id: user.id, name: user.name } }, ws)
-        broadcast(room, { type: 'users', users: roomUserList(room) })
-        break
-      }
-
-      // Сообщение: { type:'message', text | encrypted, msgType }
-      case 'message': {
-        const user = users.get(ws)
-        if (!user) return
-        const entry = {
-          id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
-          from: user.id,
-          fromName: user.name,
-          msgType: msg.msgType || 'text',
-          text: msg.text,
-          encrypted: msg.encrypted,
-          dataUrl: msg.dataUrl,
-          time: new Date().toISOString(),
-        }
-        const h = getHistory(user.room)
-        h.push(entry)
-        if (h.length > HISTORY_LIMIT) h.shift()
-        broadcast(user.room, { type: 'message', message: entry })
-        break
-      }
-
-      // Печатает: { type:'typing' }
-      case 'typing': {
-        const user = users.get(ws)
-        if (!user) return
-        broadcast(user.room, { type: 'typing', userId: user.id, name: user.name }, ws)
-        break
-      }
-
-      // WebRTC сигналинг (для будущих звонков): просто пересылаем
-      case 'signal': {
-        const user = users.get(ws)
-        if (!user) return
-        broadcast(user.room, { type: 'signal', from: user.id, data: msg.data, target: msg.target }, ws)
-        break
-      }
-    }
+  socket.on('join', (p = {}) => {
+    currentRoom = String(p.room || 'general').slice(0, 64)
+    me = { id: p.userId || socket.id, name: String(p.name || 'Гость').slice(0, 40) }
+    socket.join(currentRoom)
+    if (!roomUsers.has(currentRoom)) roomUsers.set(currentRoom, new Map())
+    roomUsers.get(currentRoom).set(socket.id, me)
+    socket.emit('history', { messages: getHistory(currentRoom) })
+    io.to(currentRoom).emit('users', { users: userList(currentRoom) })
+    socket.to(currentRoom).emit('user_joined', { user: me })
   })
 
-  ws.on('close', () => {
-    const user = users.get(ws)
-    if (user) {
-      const clients = rooms.get(user.room)
-      if (clients) {
-        clients.delete(ws)
-        if (clients.size === 0) rooms.delete(user.room)
-        else {
-          broadcast(user.room, { type: 'user_left', user: { id: user.id, name: user.name } })
-          broadcast(user.room, { type: 'users', users: roomUserList(user.room) })
-        }
-      }
-      users.delete(ws)
+  socket.on('message', (msg = {}) => {
+    if (!currentRoom || !me) return
+    const entry = {
+      id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
+      from: me.id,
+      fromName: me.name,
+      msgType: msg.msgType || 'text',
+      text: msg.text,
+      encrypted: msg.encrypted,
+      dataUrl: msg.dataUrl,
+      time: new Date().toISOString(),
+    }
+    const h = getHistory(currentRoom)
+    h.push(entry)
+    if (h.length > HISTORY_LIMIT) h.shift()
+    io.to(currentRoom).emit('message', { message: entry })
+  })
+
+  socket.on('typing', () => {
+    if (!currentRoom || !me) return
+    socket.to(currentRoom).emit('typing', { userId: me.id, name: me.name })
+  })
+
+  socket.on('signal', (data = {}) => {
+    if (!currentRoom) return
+    socket.to(currentRoom).emit('signal', { from: me && me.id, data: data.data, target: data.target })
+  })
+
+  socket.on('disconnect', () => {
+    if (currentRoom && roomUsers.has(currentRoom)) {
+      roomUsers.get(currentRoom).delete(socket.id)
+      if (roomUsers.get(currentRoom).size === 0) roomUsers.delete(currentRoom)
+      io.to(currentRoom).emit('users', { users: userList(currentRoom) })
+      if (me) socket.to(currentRoom).emit('user_left', { user: me })
     }
   })
 })
-
-// Пинг каждые 30с — отсеиваем мёртвые соединения
-setInterval(() => {
-  wss.clients.forEach(ws => {
-    if (!ws.isAlive) return ws.terminate()
-    ws.isAlive = false
-    ws.ping()
-  })
-}, 30000)
 
 server.listen(PORT, () => {
-  console.log(`SVchat server на порту ${PORT}`)
+  console.log(`SVchat Socket.IO server на порту ${PORT}`)
 })
