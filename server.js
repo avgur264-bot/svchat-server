@@ -23,12 +23,24 @@ function userList(room) {
   return m ? [...m.values()] : []
 }
 
+const fs = require('fs')
+const path = require('path')
+let appHtml = null
+try { appHtml = fs.readFileSync(path.join(__dirname, 'index.html')) } catch {}
+
 const server = http.createServer((req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
-  })
-  res.end(JSON.stringify({ ok: true, online: [...roomUsers.values()].reduce((n, m) => n + m.size, 0) }))
+  const url = (req.url || '/').split('?')[0]
+  if (url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+    res.end(JSON.stringify({ ok: true, online: [...roomUsers.values()].reduce((n, m) => n + m.size, 0) }))
+  } else if (appHtml) {
+    // Раздаём приложение с того же адреса — никаких межсайтовых запросов
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.end(appHtml)
+  } else {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
+    res.end(JSON.stringify({ ok: true }))
+  }
 })
 
 const io = new Server(server, {
