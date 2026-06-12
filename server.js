@@ -6,6 +6,7 @@
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { Server } = require('socket.io')
 const webpush = require('web-push')
 
@@ -174,6 +175,13 @@ async function dbSaveMsg(room, entry) {
       [room, HISTORY_LIMIT])
   } catch (e) { console.error('[db] сообщение:', e.message) }
 }
+async function dbUpdateMsg(room, entry) {
+  if (!pool) return
+  try {
+    await pool.query(`UPDATE svchat_messages SET entry = $3 WHERE room = $1 AND id = $2`,
+      [room, entry.id, entry])
+  } catch (e) { console.error('[db] обновление сообщения:', e.message) }
+}
 async function dbLoadHistory(room) {
   if (!pool) return null
   try {
@@ -283,6 +291,25 @@ function userList(room) {
 }
 // ── Личные чаты (Этап 3) ─────────────────────────────────────────────────────
 function isDm(room) { return typeof room === 'string' && room.startsWith('dm:') }
+
+// ── Безопасность паролей: scrypt с солью, формат "scrypt$<соль>$<хеш>" ──
+function hashPassword(plain) {
+  if (!plain) return null
+  const salt = crypto.randomBytes(16).toString('hex')
+  const hash = crypto.scryptSync(String(plain), salt, 32).toString('hex')
+  return 'scrypt$' + salt + '$' + hash
+}
+function verifyPassword(plain, stored) {
+  if (!stored) return !plain
+  if (typeof stored === 'string' && stored.startsWith('scrypt$')) {
+    const [, salt, hash] = stored.split('$')
+    const calc = crypto.scryptSync(String(plain || ''), salt, 32).toString('hex')
+    const a = Buffer.from(hash, 'hex'), b = Buffer.from(calc, 'hex')
+    return a.length === b.length && crypto.timingSafeEqual(a, b)
+  }
+  // Совместимость: старые комнаты с паролем в открытом виде
+  return stored === plain
+}
 function dmMembers(room) {
   const p = String(room).split(':')
   return p.length === 3 && p[1] && p[2] ? [p[1], p[2]] : null
@@ -441,8 +468,19 @@ const io = new Server(server, {
 io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
+  // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
+  const rl = { msg: [], join: [] }
+  function allow(kind, max, windowMs) {
+    const now = Date.now()
+    const arr = rl[kind]
+    while (arr.length && now - arr[0] > windowMs) arr.shift()
+    if (arr.length >= max) return false
+    arr.push(now)
+    return true
+  }
 
   socket.on('join', async (p = {}) => {
+    if (!allow('join', 20, 30000)) { socket.emit('join_error', { reason: 'rate_limited' }); return }
     await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
@@ -463,18 +501,23 @@ io.on('connection', (socket) => {
     } else if (!occupied) {
       const prev = roomMeta.get(room)
       if (prev && prev.password) {
-        if (prev.password !== password) {
+        if (!verifyPassword(password, prev.password)) {
           socket.emit('join_error', { reason: 'wrong_password' })
           return
         }
         meta = prev
+        // Миграция: если пароль ещё в открытом виде — пересохраняем хешем
+        if (!String(prev.password).startsWith('scrypt$')) {
+          meta.password = hashPassword(password)
+          dbSaveRoom(room, meta)
+        }
       } else {
-        meta = { password: password || null, adminId: password ? user.id : null }
+        meta = { password: password ? hashPassword(password) : null, adminId: password ? user.id : null }
         dbSaveRoom(room, meta)
       }
       roomMeta.set(room, meta)
     } else {
-      if (meta && meta.password && meta.password !== password) {
+      if (meta && meta.password && !verifyPassword(password, meta.password)) {
         socket.emit('join_error', { reason: 'wrong_password' })
         return
       }
@@ -508,6 +551,13 @@ io.on('connection', (socket) => {
 
   socket.on('message', (msg = {}, ack) => {
     if (!currentRoom || !me) { if (typeof ack === 'function') ack({ ok: false }); return }
+    if (!allow('msg', 8, 5000)) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'rate_limited' })
+      socket.emit('rate_limited', { reason: 'too_fast' })
+      return
+    }
+    // Ограничение длины текста
+    if (typeof msg.text === 'string' && msg.text.length > 4000) msg.text = msg.text.slice(0, 4000)
     const entry = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       from: me.id,
@@ -575,6 +625,47 @@ io.on('connection', (socket) => {
     m.set(String(me.id), ts)
     dbSaveDeliv(currentRoom, String(me.id), ts)
     io.to(currentRoom).emit('delivs', { userId: String(me.id), ts })
+  })
+
+  // Реакция на сообщение: тоггл эмодзи от пользователя
+  socket.on('react', (p = {}) => {
+    if (!currentRoom || !me) return
+    if (!allow('msg', 20, 5000)) return
+    const id = String(p.id || '')
+    const emoji = String(p.emoji || '').slice(0, 8)
+    if (!id || !emoji) return
+    const h = getHistory(currentRoom)
+    const entry = h.find(e => e.id === id)
+    if (!entry) return
+    if (!entry.reactions) entry.reactions = {}
+    const users = entry.reactions[emoji] || []
+    const idx = users.indexOf(String(me.id))
+    if (idx >= 0) users.splice(idx, 1)   // снять свою реакцию
+    else users.push(String(me.id))        // поставить
+    if (users.length) entry.reactions[emoji] = users
+    else delete entry.reactions[emoji]
+    io.to(currentRoom).emit('reaction', { id, reactions: entry.reactions })
+    dbUpdateMsg(currentRoom, entry)
+  })
+
+  // Удаление своего сообщения (админ может удалять любые)
+  socket.on('delete_msg', (p = {}) => {
+    if (!currentRoom || !me) return
+    const id = String(p.id || '')
+    if (!id) return
+    const h = getHistory(currentRoom)
+    const entry = h.find(e => e.id === id)
+    if (!entry) return
+    const meta = roomMeta.get(currentRoom)
+    const isAdmin = meta && meta.adminId === me.id
+    if (String(entry.from) !== String(me.id) && !isAdmin) return // нельзя удалять чужое
+    entry.deleted = true
+    entry.text = ''
+    entry.dataUrl = undefined
+    entry.msgType = 'text'
+    entry.reactions = undefined
+    io.to(currentRoom).emit('msg_deleted', { id })
+    dbUpdateMsg(currentRoom, entry)
   })
 
   socket.on('read', (p = {}) => {
@@ -655,5 +746,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v29: ответы на сообщения, push без дублей) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v31: реакции и удаление сообщений) на порту ' + PORT)
 })
