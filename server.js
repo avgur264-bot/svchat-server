@@ -167,7 +167,7 @@ const server = http.createServer(async (req, res) => {
 
 // ── Socket.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  maxHttpBufferSize: 25e6, // до ~20 МБ видео
+  maxHttpBufferSize: 45e6, // с запасом над клиентским лимитом ~22 МБ видео
   cors: { origin: '*', methods: ['GET', 'POST'] },
   pingInterval: 25000,
   pingTimeout: 20000,
@@ -216,8 +216,8 @@ io.on('connection', (socket) => {
     socket.to(room).emit('user_joined', { user: me })
   })
 
-  socket.on('message', (msg = {}) => {
-    if (!currentRoom || !me) return
+  socket.on('message', (msg = {}, ack) => {
+    if (!currentRoom || !me) { if (typeof ack === 'function') ack({ ok: false }); return }
     const entry = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       from: me.id,
@@ -241,6 +241,7 @@ io.on('connection', (socket) => {
       mediaBytes -= (dropped.dataUrl ? dropped.dataUrl.length : 0)
     }
     io.to(currentRoom).emit('message', { message: entry })
+    if (typeof ack === 'function') ack({ ok: true })
 
     // Push тем, у кого приложение закрыто
     pushToRoom(currentRoom, me.id, {
