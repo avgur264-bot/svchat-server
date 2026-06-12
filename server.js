@@ -148,7 +148,7 @@ const server = http.createServer(async (req, res) => {
 
 // ── Socket.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
-  maxHttpBufferSize: 10e6,
+  maxHttpBufferSize: 25e6, // до ~20 МБ видео
   cors: { origin: '*', methods: ['GET', 'POST'] },
   pingInterval: 25000,
   pingTimeout: 20000,
@@ -207,17 +207,25 @@ io.on('connection', (socket) => {
       text: msg.text,
       encrypted: msg.encrypted,
       dataUrl: msg.dataUrl,
+      dur: msg.dur,
       time: new Date().toISOString(),
     }
     const h = getHistory(currentRoom)
     h.push(entry)
     if (h.length > HISTORY_LIMIT) h.shift()
+    // Защита памяти: тяжёлые медиа в истории комнаты суммарно не больше ~60 МБ
+    let mediaBytes = 0
+    for (const e of h) mediaBytes += (e.dataUrl ? e.dataUrl.length : 0)
+    while (mediaBytes > 60e6 && h.length > 1) {
+      const dropped = h.shift()
+      mediaBytes -= (dropped.dataUrl ? dropped.dataUrl.length : 0)
+    }
     io.to(currentRoom).emit('message', { message: entry })
 
     // Push тем, у кого приложение закрыто
     pushToRoom(currentRoom, me.id, {
       title: me.name + ' · ' + currentRoom,
-      body: entry.msgType === 'photo' ? '📷 Фото' : String(entry.text || 'Сообщение').slice(0, 120),
+      body: entry.msgType === 'photo' ? '📷 Фото' : entry.msgType === 'video' ? '🎬 Видео' : entry.msgType === 'voice' ? '🎤 Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
       tag: 'svchat-' + currentRoom,
       url: '/?room=' + encodeURIComponent(currentRoom)
     }).catch(() => {})
