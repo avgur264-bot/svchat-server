@@ -21,7 +21,7 @@ webpush.setVapidDetails('mailto:admin@svchat.app', VAPID_PUBLIC, VAPID_PRIVATE)
 // room -> Map<endpoint, { sub, userId }>
 const pushSubs = new Map()
 function addSub(room, userId, sub) {
-  if (!sub || !sub.endpoint) return
+  if (!sub || typeof sub.endpoint !== 'string' || !sub.endpoint.startsWith('https://') || sub.endpoint.length > 500) return
   if (!pushSubs.has(room)) pushSubs.set(room, new Map())
   pushSubs.get(room).set(sub.endpoint, { sub, userId })
 }
@@ -443,8 +443,9 @@ const server = http.createServer(async (req, res) => {
     const b = await readBody(req)
     if (b && b.room && b.subscription) {
       const rm = String(b.room).slice(0, 64)
-      addSub(rm, b.userId || '', b.subscription)
-      dbSaveSub(rm, b.userId || '', b.subscription)
+      const uid = String(b.userId || '').slice(0, 80)
+      addSub(rm, uid, b.subscription)
+      dbSaveSub(rm, uid, b.subscription)
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
@@ -469,7 +470,7 @@ io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
   // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
-  const rl = { msg: [], join: [] }
+  const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [] }
   function allow(kind, max, windowMs) {
     const now = Date.now()
     const arr = rl[kind]
@@ -484,7 +485,7 @@ io.on('connection', (socket) => {
     await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
-    const user = { id: p.userId || socket.id, name: String(p.name || 'Гость').slice(0, 40) }
+    const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40) }
 
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
@@ -558,6 +559,18 @@ io.on('connection', (socket) => {
     }
     // Ограничение длины текста
     if (typeof msg.text === 'string' && msg.text.length > 4000) msg.text = msg.text.slice(0, 4000)
+    // Валидация типа и медиа: только data:-URL, лимиты по типу
+    const MT = ['text', 'photo', 'video', 'voice']
+    if (!MT.includes(msg.msgType)) msg.msgType = 'text'
+    if (msg.dataUrl != null) {
+      const du = String(msg.dataUrl)
+      const cap = msg.msgType === 'video' ? 32e6 : msg.msgType === 'photo' ? 8e6 : msg.msgType === 'voice' ? 6e6 : 0
+      if (!du.startsWith('data:') || du.length > cap) {
+        if (typeof ack === 'function') ack({ ok: false, error: 'bad_media' })
+        return
+      }
+      msg.dataUrl = du
+    }
     const entry = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       from: me.id,
@@ -611,11 +624,13 @@ io.on('connection', (socket) => {
 
   socket.on('typing', () => {
     if (!currentRoom || !me) return
+    if (!allow('typing', 10, 5000)) return
     socket.to(currentRoom).emit('typing', { userId: me.id, name: me.name })
   })
 
   socket.on('delivered', (p = {}) => {
     if (!currentRoom || !me) return
+    if (!allow('rw', 30, 10000)) return
     const ts = String(p.ts || '').slice(0, 40)
     if (!ts) return
     if (!roomDelivs.has(currentRoom)) roomDelivs.set(currentRoom, new Map())
@@ -638,6 +653,7 @@ io.on('connection', (socket) => {
     const entry = h.find(e => e.id === id)
     if (!entry) return
     if (!entry.reactions) entry.reactions = {}
+    if (!entry.reactions[emoji] && Object.keys(entry.reactions).length >= 12) return
     const users = entry.reactions[emoji] || []
     const idx = users.indexOf(String(me.id))
     if (idx >= 0) users.splice(idx, 1)   // снять свою реакцию
@@ -670,6 +686,7 @@ io.on('connection', (socket) => {
 
   socket.on('read', (p = {}) => {
     if (!currentRoom || !me) return
+    if (!allow('rw', 30, 10000)) return
     const ts = String(p.ts || '').slice(0, 40)
     if (!ts) return
     if (!roomReads.has(currentRoom)) roomReads.set(currentRoom, new Map())
@@ -704,6 +721,7 @@ io.on('connection', (socket) => {
 
   socket.on('dm_invite', (p = {}) => {
     if (!currentRoom || !me) return
+    if (!allow('dm', 5, 30000)) return
     const targetId = String(p.targetId || '')
     if (!targetId || targetId === String(me.id)) return
     const dm = dmRoomId(me.id, targetId)
@@ -728,7 +746,9 @@ io.on('connection', (socket) => {
 
   socket.on('signal', (data = {}) => {
     if (!currentRoom) return
-    socket.to(currentRoom).emit('signal', { from: me && me.id, data: data.data, target: data.target })
+    if (!allow('signal', 40, 10000)) return
+    try { if (JSON.stringify(data.data || '').length > 20000) return } catch { return }
+    socket.to(currentRoom).emit('signal', { from: me && me.id, data: data.data, target: String(data.target || '').slice(0, 80) })
   })
 
   socket.on('disconnect', () => {
@@ -746,5 +766,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v32: фикс доставки реакций) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v33: аудит — валидация, лимиты, медиа) на порту ' + PORT)
 })
