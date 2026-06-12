@@ -343,10 +343,17 @@ self.addEventListener('push', e => {
 })
 self.addEventListener('notificationclick', e => {
   e.notification.close()
+  const url = (e.notification.data && e.notification.data.url) || '/'
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
-    for (const c of all) { try { await c.focus(); return } catch {} }
-    await self.clients.openWindow(e.notification.data && e.notification.data.url || '/')
+    for (const c of all) {
+      try {
+        await c.focus()
+        c.postMessage({ type: 'open-room', url })
+        return
+      } catch {}
+    }
+    await self.clients.openWindow(url)
   })())
 })
 `
@@ -634,5 +641,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v26: фоновый бэкфилл, входы не блокируются) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v28: тап по push открывает нужный чат) на порту ' + PORT)
 })
