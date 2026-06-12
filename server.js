@@ -40,6 +40,9 @@ async function pushToRoom(room, exceptUserId, payload) {
 }
 
 const history = new Map()
+const roomMembers = new Map() // room -> Map<userId, {name, lastSeen}> — все, кто когда-либо заходил
+const roomReads = new Map()   // room -> Map<userId, ISO-время последнего прочитанного>
+const roomDelivs = new Map()  // room -> Map<userId, ISO-время последнего доставленного на устройство>
 const roomUsers = new Map()
 const roomMeta = new Map()
 
@@ -78,7 +81,31 @@ const dbReady = (async () => {
       if (!pushSubs.has(r.room)) pushSubs.set(r.room, new Map())
       pushSubs.get(r.room).set(r.endpoint, { sub: r.sub, userId: r.user_id })
     }
-    console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_members (
+      room TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT, last_seen TIMESTAMPTZ DEFAULT now(),
+      PRIMARY KEY (room, user_id))`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_reads (
+      room TEXT NOT NULL, user_id TEXT NOT NULL, ts TEXT,
+      PRIMARY KEY (room, user_id))`)
+    const mems = await pool.query(`SELECT room, user_id, name, last_seen FROM svchat_members`)
+    for (const r of mems.rows) {
+      if (!roomMembers.has(r.room)) roomMembers.set(r.room, new Map())
+      roomMembers.get(r.room).set(r.user_id, { name: r.name, lastSeen: r.last_seen })
+    }
+    const reads = await pool.query(`SELECT room, user_id, ts FROM svchat_reads`)
+    for (const r of reads.rows) {
+      if (!roomReads.has(r.room)) roomReads.set(r.room, new Map())
+      roomReads.get(r.room).set(r.user_id, r.ts)
+    }
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_delivs (
+      room TEXT NOT NULL, user_id TEXT NOT NULL, ts TEXT,
+      PRIMARY KEY (room, user_id))`)
+    const delivs = await pool.query(`SELECT room, user_id, ts FROM svchat_delivs`)
+    for (const r of delivs.rows) {
+      if (!roomDelivs.has(r.room)) roomDelivs.set(r.room, new Map())
+      roomDelivs.get(r.room).set(r.user_id, r.ts)
+    }
+    console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
     console.error('[db] инициализация не удалась, режим памяти:', e.message)
@@ -131,6 +158,71 @@ async function dbSaveSub(room, userId, sub) {
 async function dbDelSub(endpoint) {
   if (!pool) return
   try { await pool.query(`DELETE FROM svchat_push WHERE endpoint = $1`, [endpoint]) } catch {}
+}
+
+async function dbSaveMember(room, userId, name) {
+  if (!pool) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_members (room, user_id, name, last_seen) VALUES ($1, $2, $3, now())
+       ON CONFLICT (room, user_id) DO UPDATE SET name = $3, last_seen = now()`,
+      [room, userId, name])
+  } catch (e) { console.error('[db] member:', e.message) }
+}
+
+async function dbDelMember(room, userId) {
+  if (!pool) return
+  try { await pool.query(`DELETE FROM svchat_members WHERE room = $1 AND user_id = $2`, [room, userId]) } catch {}
+}
+
+async function dbSaveRead(room, userId, ts) {
+  if (!pool) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_reads (room, user_id, ts) VALUES ($1, $2, $3)
+       ON CONFLICT (room, user_id) DO UPDATE SET ts = $3`,
+      [room, userId, ts])
+  } catch (e) { console.error('[db] read:', e.message) }
+}
+
+async function dbSaveDeliv(room, userId, ts) {
+  if (!pool) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_delivs (room, user_id, ts) VALUES ($1, $2, $3)
+       ON CONFLICT (room, user_id) DO UPDATE SET ts = $3`,
+      [room, userId, ts])
+  } catch (e) { console.error('[db] deliv:', e.message) }
+}
+
+// Полный список участников комнаты: и онлайн, и не в сети
+function memberList(room) {
+  const meta = roomMeta.get(room)
+  const adminId = meta && meta.adminId
+  const onlineIds = new Set()
+  const m = roomUsers.get(room)
+  if (m) for (const u of m.values()) onlineIds.add(String(u.id))
+  const out = []
+  const reg = roomMembers.get(room)
+  if (reg) for (const [id, rec] of reg.entries()) {
+    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: rec.lastSeen || null })
+  }
+  // онлайн-пользователи, которых ещё нет в реестре (режим памяти без базы)
+  if (m) for (const u of m.values()) {
+    if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, isAdmin: adminId === u.id, lastSeen: null })
+  }
+  out.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), 'ru'))
+  return out
+}
+
+function touchMember(room, user) {
+  if (!roomMembers.has(room)) roomMembers.set(room, new Map())
+  roomMembers.get(room).set(String(user.id), { name: user.name, lastSeen: new Date().toISOString() })
+  dbSaveMember(room, String(user.id), user.name)
+}
+
+function broadcastMembers(room) {
+  io.to(room).emit('members', { members: memberList(room) })
 }
 
 function getHistory(room) {
@@ -348,9 +440,16 @@ io.on('connection', (socket) => {
       if (fromDb && fromDb.length) { history.set(room, fromDb); h = fromDb }
     }
 
+    touchMember(room, me)
+
     socket.emit('joined', { room, isAdmin: !!(meta && meta.adminId === me.id), locked: !!(meta && meta.password) })
     socket.emit('history', { messages: h })
+    const rd = roomReads.get(room)
+    socket.emit('reads_state', { reads: rd ? Object.fromEntries(rd.entries()) : {} })
+    const dv = roomDelivs.get(room)
+    socket.emit('delivs_state', { delivs: dv ? Object.fromEntries(dv.entries()) : {} })
     io.to(room).emit('users', { users: userList(room) })
+    broadcastMembers(room)
     socket.to(room).emit('user_joined', { user: me })
   })
 
@@ -407,6 +506,32 @@ io.on('connection', (socket) => {
     socket.to(currentRoom).emit('typing', { userId: me.id, name: me.name })
   })
 
+  socket.on('delivered', (p = {}) => {
+    if (!currentRoom || !me) return
+    const ts = String(p.ts || '').slice(0, 40)
+    if (!ts) return
+    if (!roomDelivs.has(currentRoom)) roomDelivs.set(currentRoom, new Map())
+    const m = roomDelivs.get(currentRoom)
+    const prev = m.get(String(me.id))
+    if (prev && prev >= ts) return
+    m.set(String(me.id), ts)
+    dbSaveDeliv(currentRoom, String(me.id), ts)
+    io.to(currentRoom).emit('delivs', { userId: String(me.id), ts })
+  })
+
+  socket.on('read', (p = {}) => {
+    if (!currentRoom || !me) return
+    const ts = String(p.ts || '').slice(0, 40)
+    if (!ts) return
+    if (!roomReads.has(currentRoom)) roomReads.set(currentRoom, new Map())
+    const m = roomReads.get(currentRoom)
+    const prev = m.get(String(me.id))
+    if (prev && prev >= ts) return // уже отмечено более позднее
+    m.set(String(me.id), ts)
+    dbSaveRead(currentRoom, String(me.id), ts)
+    io.to(currentRoom).emit('reads', { userId: String(me.id), ts })
+  })
+
   socket.on('kick', (p = {}) => {
     if (!currentRoom || !me) return
     const meta = roomMeta.get(currentRoom)
@@ -422,7 +547,10 @@ io.on('connection', (socket) => {
         m.delete(sockId)
       }
     }
+    if (roomMembers.has(currentRoom)) roomMembers.get(currentRoom).delete(targetId)
+    dbDelMember(currentRoom, targetId)
     io.to(currentRoom).emit('users', { users: userList(currentRoom) })
+    broadcastMembers(currentRoom)
   })
 
   socket.on('dm_invite', (p = {}) => {
@@ -459,11 +587,15 @@ io.on('connection', (socket) => {
       roomUsers.get(currentRoom).delete(socket.id)
       if (roomUsers.get(currentRoom).size === 0) roomUsers.delete(currentRoom)
       io.to(currentRoom).emit('users', { users: userList(currentRoom) })
-      if (me) socket.to(currentRoom).emit('user_left', { user: me })
+      if (me) {
+        touchMember(currentRoom, me)
+        socket.to(currentRoom).emit('user_left', { user: me })
+      }
+      broadcastMembers(currentRoom)
     }
   })
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3: личные чаты) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++: личка, last seen, 3 ступени галочек) на порту ' + PORT)
 })
