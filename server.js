@@ -746,5 +746,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v31: реакции и удаление сообщений) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v32: фикс доставки реакций) на порту ' + PORT)
 })
