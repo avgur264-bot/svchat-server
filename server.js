@@ -447,6 +447,35 @@ const server = http.createServer(async (req, res) => {
   } else if (url === '/vapid') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ key: VAPID_PUBLIC }))
+  } else if (url === '/contacts') {
+    // Книжка контактов: уникальные люди из перечисленных комнат
+    await dbReady
+    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
+    const rooms = String(q.get('rooms') || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50)
+    const meId = String(q.get('me') || '')
+    const seen = new Map()
+    for (const room of rooms) {
+      const m = roomMembers.get(room)
+      if (!m) continue
+      const online = onlineIdsIn(room)
+      for (const [uid, info] of m.entries()) {
+        if (uid === meId) continue
+        const prev = seen.get(uid)
+        const cand = {
+          id: uid,
+          name: (info && info.name) || 'Без имени',
+          lastSeen: (info && info.lastSeen) || null,
+          online: online.has(uid)
+        }
+        if (!prev || cand.online || (cand.lastSeen && (!prev.lastSeen || cand.lastSeen > prev.lastSeen))) {
+          seen.set(uid, prev ? Object.assign(prev, { online: prev.online || cand.online, lastSeen: cand.lastSeen || prev.lastSeen, name: cand.name }) : cand)
+        }
+      }
+    }
+    const list = Array.from(seen.values()).sort((a, b) =>
+      (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ contacts: list }))
   } else if (url === '/ice') {
     const u = process.env.TURN_USERNAME
     const c = process.env.TURN_CREDENTIAL
@@ -828,5 +857,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v37: мгновенное открытие чатов) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v38: книжка контактов) на порту ' + PORT)
 })
