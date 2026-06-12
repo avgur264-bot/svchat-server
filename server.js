@@ -34,7 +34,7 @@ async function pushToRoom(room, exceptUserId, payload) {
       await webpush.sendNotification(sub, data, { TTL: 60 })
     } catch (e) {
       const code = e && e.statusCode
-      if (code === 404 || code === 410) m.delete(endpoint) // подписка умерла
+      if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) } // подписка умерла
     }
   }
 }
@@ -42,6 +42,96 @@ async function pushToRoom(room, exceptUserId, payload) {
 const history = new Map()
 const roomUsers = new Map()
 const roomMeta = new Map()
+
+// ── База данных (Этап 2): Postgres через DATABASE_URL ────────────────────────
+// Если переменная не задана — сервер работает как раньше (всё в памяти).
+let pool = null
+const DB_URL = process.env.DATABASE_URL || ''
+if (DB_URL) {
+  try {
+    const { Pool } = require('pg')
+    pool = new Pool({
+      connectionString: DB_URL,
+      ssl: DB_URL.includes('.render.com') ? { rejectUnauthorized: false } : false,
+      max: 5,
+    })
+    pool.on('error', e => console.error('[db] ошибка пула:', e.message))
+  } catch (e) { console.error('[db] модуль pg недоступен:', e.message) }
+} else {
+  console.log('[db] DATABASE_URL не задан — режим памяти (история сотрётся при деплое)')
+}
+
+const dbReady = (async () => {
+  if (!pool) return false
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_rooms (
+      room TEXT PRIMARY KEY, password TEXT, admin_id TEXT, created_at TIMESTAMPTZ DEFAULT now())`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_messages (
+      id TEXT PRIMARY KEY, room TEXT NOT NULL, entry JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS svchat_messages_room_idx ON svchat_messages (room, created_at)`)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_push (
+      endpoint TEXT PRIMARY KEY, room TEXT NOT NULL, user_id TEXT, sub JSONB NOT NULL)`)
+    const rooms = await pool.query(`SELECT room, password, admin_id FROM svchat_rooms`)
+    for (const r of rooms.rows) roomMeta.set(r.room, { password: r.password, adminId: r.admin_id })
+    const subs = await pool.query(`SELECT endpoint, room, user_id, sub FROM svchat_push`)
+    for (const r of subs.rows) {
+      if (!pushSubs.has(r.room)) pushSubs.set(r.room, new Map())
+      pushSubs.get(r.room).set(r.endpoint, { sub: r.sub, userId: r.user_id })
+    }
+    console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount)
+    return true
+  } catch (e) {
+    console.error('[db] инициализация не удалась, режим памяти:', e.message)
+    pool = null
+    return false
+  }
+})()
+
+async function dbSaveRoom(room, meta) {
+  if (!pool) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_rooms (room, password, admin_id) VALUES ($1, $2, $3)
+       ON CONFLICT (room) DO UPDATE SET password = EXCLUDED.password, admin_id = EXCLUDED.admin_id`,
+      [room, meta.password || null, meta.adminId || null])
+  } catch (e) { console.error('[db] комната:', e.message) }
+}
+async function dbSaveMsg(room, entry) {
+  if (!pool) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_messages (id, room, entry) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
+      [entry.id, room, entry])
+    await pool.query(
+      `DELETE FROM svchat_messages WHERE room = $1 AND id IN (
+         SELECT id FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC OFFSET $2)`,
+      [room, HISTORY_LIMIT])
+  } catch (e) { console.error('[db] сообщение:', e.message) }
+}
+async function dbLoadHistory(room) {
+  if (!pool) return null
+  try {
+    const r = await pool.query(
+      `SELECT entry FROM (
+         SELECT entry, created_at FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC LIMIT $2
+       ) t ORDER BY created_at ASC`,
+      [room, HISTORY_LIMIT])
+    return r.rows.map(x => x.entry)
+  } catch (e) { console.error('[db] история:', e.message); return null }
+}
+async function dbSaveSub(room, userId, sub) {
+  if (!pool || !sub || !sub.endpoint) return
+  try {
+    await pool.query(
+      `INSERT INTO svchat_push (endpoint, room, user_id, sub) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (endpoint) DO UPDATE SET room = EXCLUDED.room, user_id = EXCLUDED.user_id, sub = EXCLUDED.sub`,
+      [sub.endpoint, room, userId || '', sub])
+  } catch (e) { console.error('[db] подписка:', e.message) }
+}
+async function dbDelSub(endpoint) {
+  if (!pool) return
+  try { await pool.query(`DELETE FROM svchat_push WHERE endpoint = $1`, [endpoint]) } catch {}
+}
 
 function getHistory(room) {
   if (!history.has(room)) history.set(room, [])
@@ -135,7 +225,7 @@ const server = http.createServer(async (req, res) => {
   const url = (req.url || '/').split('?')[0]
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
-    res.end(JSON.stringify({ ok: true, online: onlineTotal() }))
+    res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool }))
   } else if (url === '/sw.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
     res.end(SW_JS)
@@ -153,7 +243,11 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ key: VAPID_PUBLIC }))
   } else if (url === '/subscribe' && req.method === 'POST') {
     const b = await readBody(req)
-    if (b && b.room && b.subscription) addSub(String(b.room).slice(0, 64), b.userId || '', b.subscription)
+    if (b && b.room && b.subscription) {
+      const rm = String(b.room).slice(0, 64)
+      addSub(rm, b.userId || '', b.subscription)
+      dbSaveSub(rm, b.userId || '', b.subscription)
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
   } else if (appHtml) {
@@ -177,7 +271,8 @@ io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
 
-  socket.on('join', (p = {}) => {
+  socket.on('join', async (p = {}) => {
+    await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
     const user = { id: p.userId || socket.id, name: String(p.name || 'Гость').slice(0, 40) }
@@ -195,6 +290,7 @@ io.on('connection', (socket) => {
         meta = prev
       } else {
         meta = { password: password || null, adminId: password ? user.id : null }
+        dbSaveRoom(room, meta)
       }
       roomMeta.set(room, meta)
     } else {
@@ -210,8 +306,15 @@ io.on('connection', (socket) => {
     if (!roomUsers.has(room)) roomUsers.set(room, new Map())
     roomUsers.get(room).set(socket.id, me)
 
+    // История: если в памяти пусто (после рестарта) — поднимаем из базы
+    let h = getHistory(room)
+    if (h.length === 0) {
+      const fromDb = await dbLoadHistory(room)
+      if (fromDb && fromDb.length) { history.set(room, fromDb); h = fromDb }
+    }
+
     socket.emit('joined', { room, isAdmin: !!(meta && meta.adminId === me.id), locked: !!(meta && meta.password) })
-    socket.emit('history', { messages: getHistory(room) })
+    socket.emit('history', { messages: h })
     io.to(room).emit('users', { users: userList(room) })
     socket.to(room).emit('user_joined', { user: me })
   })
@@ -242,6 +345,7 @@ io.on('connection', (socket) => {
     }
     io.to(currentRoom).emit('message', { message: entry })
     if (typeof ack === 'function') ack({ ok: true })
+    dbSaveMsg(currentRoom, entry)
 
     // Push тем, у кого приложение закрыто
     pushToRoom(currentRoom, me.id, {
@@ -291,5 +395,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (push) на порту ' + PORT)
+  console.log('SVchat server (Этап 2: push + база) на порту ' + PORT)
 })
