@@ -92,6 +92,31 @@ const dbReady = (async () => {
       if (!roomMembers.has(r.room)) roomMembers.set(r.room, new Map())
       roomMembers.get(r.room).set(r.user_id, { name: r.name, lastSeen: r.last_seen })
     }
+    // Восстановление участников задним числом — из авторов сообщений в истории
+    try {
+      const hist = await pool.query(
+        `SELECT room, entry->>'from' AS uid, entry->>'fromName' AS uname, max(entry->>'time') AS last_ts
+         FROM svchat_messages
+         WHERE entry->>'from' IS NOT NULL
+         GROUP BY room, entry->>'from', entry->>'fromName'`)
+      let added = 0
+      for (const r of hist.rows) {
+        if (!r.uid || r.room.startsWith('dm:')) continue
+        if (!roomMembers.has(r.room)) roomMembers.set(r.room, new Map())
+        const reg = roomMembers.get(r.room)
+        if (!reg.has(r.uid)) {
+          const seen = r.last_ts || new Date().toISOString()
+          reg.set(r.uid, { name: r.uname || r.uid, lastSeen: seen })
+          await pool.query(
+            `INSERT INTO svchat_members (room, user_id, name, last_seen) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (room, user_id) DO NOTHING`,
+            [r.room, r.uid, r.uname || r.uid, seen])
+          added++
+        }
+      }
+      if (added) console.log('[db] участников восстановлено из истории:', added)
+    } catch (e) { console.error('[db] бэкфилл участников:', e.message) }
+
     const reads = await pool.query(`SELECT room, user_id, ts FROM svchat_reads`)
     for (const r of reads.rows) {
       if (!roomReads.has(r.room)) roomReads.set(r.room, new Map())
@@ -597,5 +622,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++: личка, last seen, 3 ступени галочек) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v25: участники восстановлены из истории) на порту ' + PORT)
 })
