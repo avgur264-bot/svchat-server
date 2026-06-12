@@ -439,6 +439,21 @@ const server = http.createServer(async (req, res) => {
   } else if (url === '/vapid') {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ key: VAPID_PUBLIC }))
+  } else if (url === '/ice') {
+    const u = process.env.TURN_USERNAME
+    const c = process.env.TURN_CREDENTIAL
+    const iceServers = [{ urls: 'stun:stun.relay.metered.ca:80' }]
+    if (u && c) {
+      iceServers.push(
+        { urls: 'turn:standard.relay.metered.ca:80', username: u, credential: c },
+        { urls: 'turn:standard.relay.metered.ca:80?transport=tcp', username: u, credential: c },
+        { urls: 'turn:standard.relay.metered.ca:443', username: u, credential: c },
+        { urls: 'turns:standard.relay.metered.ca:443?transport=tcp', username: u, credential: c })
+    } else {
+      iceServers.push({ urls: 'stun:stun.l.google.com:19302' })
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ iceServers }))
   } else if (url === '/subscribe' && req.method === 'POST') {
     const b = await readBody(req)
     if (b && b.room && b.subscription) {
@@ -744,6 +759,21 @@ io.on('connection', (socket) => {
     }).catch(() => {})
   })
 
+  // Звонок: уведомить второго участника лички, если он не в комнате
+  socket.on('call_notify', () => {
+    if (!currentRoom || !me || !isDm(currentRoom)) return
+    if (!allow('dm', 5, 30000)) return
+    const mm = dmMembers(currentRoom) || []
+    const other = mm.find(x => x !== String(me.id))
+    if (!other || onlineIdsIn(currentRoom).has(other)) return
+    pushToUser(other, {
+      title: '\u{1F4DE} ' + me.name,
+      body: 'Входящий звонок — нажмите, чтобы ответить',
+      tag: 'svcall-' + currentRoom,
+      url: '/?room=' + encodeURIComponent(currentRoom) + '&dm=' + encodeURIComponent(me.name)
+    }).catch(() => {})
+  })
+
   socket.on('signal', (data = {}) => {
     if (!currentRoom) return
     if (!allow('signal', 40, 10000)) return
@@ -766,5 +796,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v33: аудит — валидация, лимиты, медиа) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v35: голосовые звонки 1-на-1) на порту ' + PORT)
 })
