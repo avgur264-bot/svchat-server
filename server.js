@@ -208,6 +208,7 @@ io.on('connection', (socket) => {
       encrypted: msg.encrypted,
       dataUrl: msg.dataUrl,
       dur: msg.dur,
+      len: msg.len,
       time: new Date().toISOString(),
     }
     const h = getHistory(currentRoom)
