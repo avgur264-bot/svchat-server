@@ -138,7 +138,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
   } else if (appHtml) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate' })
     res.end(appHtml)
   } else {
     res.writeHead(200, { 'Content-Type': 'application/json' })
