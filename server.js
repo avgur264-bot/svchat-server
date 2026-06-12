@@ -26,9 +26,11 @@ function addSub(room, userId, sub) {
 }
 async function pushToRoom(room, exceptUserId, payload) {
   const m = pushSubs.get(room)
+  const online = onlineIdsIn(room)
   if (!m) return
   const data = JSON.stringify(payload)
   for (const [endpoint, { sub, userId }] of [...m.entries()]) {
+    if (online.has(String(userId))) continue // приложение открыто в этой комнате — push не нужен
     if (userId === exceptUserId) continue
     try {
       await webpush.sendNotification(sub, data, { TTL: 60 })
@@ -249,6 +251,13 @@ function memberList(room) {
     if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, isAdmin: adminId === u.id, lastSeen: null })
   }
   out.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), 'ru'))
+  return out
+}
+
+function onlineIdsIn(room) {
+  const out = new Set()
+  const m = roomUsers.get(room)
+  if (m) for (const u of m.values()) out.add(String(u.id))
   return out
 }
 
@@ -505,6 +514,11 @@ io.on('connection', (socket) => {
       fromName: me.name,
       msgType: msg.msgType || 'text',
       text: msg.text,
+      replyTo: msg.replyTo && msg.replyTo.id ? {
+        id: String(msg.replyTo.id).slice(0, 64),
+        name: String(msg.replyTo.name || '').slice(0, 40),
+        text: String(msg.replyTo.text || '').slice(0, 90)
+      } : undefined,
       encrypted: msg.encrypted,
       dataUrl: msg.dataUrl,
       dur: msg.dur,
@@ -529,7 +543,7 @@ io.on('connection', (socket) => {
     if (isDm(currentRoom)) {
       const mm = dmMembers(currentRoom) || []
       const other = mm.find(x => x !== String(me.id))
-      if (other) pushToUser(other, {
+      if (other && !onlineIdsIn(currentRoom).has(other)) pushToUser(other, {
         title: '\u{1F4AC} ' + me.name,
         body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
         tag: 'svchat-' + currentRoom,
@@ -612,8 +626,8 @@ io.on('connection', (socket) => {
         }
       }
     }
-    // И push, если приложение закрыто
-    pushToUser(targetId, {
+    // И push, если приложение закрыто (онлайн-адресат получает живое событие)
+    if (!onlineIdsIn(currentRoom).has(targetId)) pushToUser(targetId, {
       title: me.name,
       body: '\u{1F4AC} приглашает вас в личный чат',
       tag: 'svchat-' + dm,
@@ -641,5 +655,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 3++ v28: тап по push открывает нужный чат) на порту ' + PORT)
+  console.log('SVchat server (Этап 3++ v29: ответы на сообщения, push без дублей) на порту ' + PORT)
 })
