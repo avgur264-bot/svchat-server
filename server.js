@@ -279,6 +279,14 @@ function broadcastMembers(room) {
   io.to(room).emit('members', { members: memberList(room) })
 }
 
+const HISTORY_INIT = 30 // сколько сообщений отдаём при входе
+function liteEntry(e) {
+  if (!e || !e.dataUrl) return e
+  const c = Object.assign({}, e)
+  delete c.dataUrl
+  c.media = 1
+  return c
+}
 function getHistory(room) {
   if (!history.has(room)) history.set(room, [])
   return history.get(room)
@@ -485,7 +493,7 @@ io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
   // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
-  const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [] }
+  const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [], med: [], old: [] }
   function allow(kind, max, windowMs) {
     const now = Date.now()
     const arr = rl[kind]
@@ -555,7 +563,7 @@ io.on('connection', (socket) => {
     touchMember(room, me)
 
     socket.emit('joined', { room, isAdmin: !!(meta && meta.adminId === me.id), locked: !!(meta && meta.password) })
-    socket.emit('history', { messages: h })
+    socket.emit('history', { messages: h.slice(-HISTORY_INIT).map(liteEntry), more: h.length > HISTORY_INIT })
     const rd = roomReads.get(room)
     socket.emit('reads_state', { reads: rd ? Object.fromEntries(rd.entries()) : {} })
     const dv = roomDelivs.get(room)
@@ -658,6 +666,30 @@ io.on('connection', (socket) => {
   })
 
   // Реакция на сообщение: тоггл эмодзи от пользователя
+  // Догрузка медиа конкретного сообщения (ленивая загрузка)
+  socket.on('get_media', (p = {}, ack) => {
+    if (typeof ack !== 'function') return
+    if (!currentRoom || !me) { ack({ ok: false }); return }
+    if (!allow('med', 60, 10000)) { ack({ ok: false, error: 'rate_limited' }); return }
+    const id = String(p.id || '')
+    const entry = getHistory(currentRoom).find(e => e.id === id)
+    if (entry && entry.dataUrl) ack({ ok: true, dataUrl: entry.dataUrl })
+    else ack({ ok: false })
+  })
+
+  // Догрузка более ранних сообщений (пагинация вверх)
+  socket.on('get_older', (p = {}, ack) => {
+    if (typeof ack !== 'function') return
+    if (!currentRoom || !me) { ack({ messages: [], more: false }); return }
+    if (!allow('old', 10, 10000)) { ack({ messages: [], more: false }); return }
+    const beforeId = String(p.before || '')
+    const h = getHistory(currentRoom)
+    const idx = h.findIndex(e => e.id === beforeId)
+    const older = idx > 0 ? h.slice(0, idx) : []
+    const page = older.slice(-HISTORY_INIT)
+    ack({ messages: page.map(liteEntry), more: older.length > HISTORY_INIT })
+  })
+
   socket.on('react', (p = {}) => {
     if (!currentRoom || !me) return
     if (!allow('msg', 20, 5000)) return
@@ -796,5 +828,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v36: голосовые и видеозвонки) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v37: мгновенное открытие чатов) на порту ' + PORT)
 })
