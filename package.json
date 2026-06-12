@@ -1,7 +1,7 @@
 {
   "name": "svchat-server",
-  "version": "1.0.0",
-  "description": "SVchat realtime server (Socket.IO)",
+  "version": "2.0.0",
+  "description": "SVchat realtime server (Socket.IO) + Postgres",
   "main": "server.js",
   "type": "commonjs",
   "scripts": {
@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "socket.io": "^4.8.3",
-    "web-push": "^3.6.7"
+    "web-push": "^3.6.7",
+    "pg": "^8.13.1"
   }
 }
