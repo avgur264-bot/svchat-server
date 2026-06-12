@@ -796,5 +796,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v35: голосовые звонки 1-на-1) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v36: голосовые и видеозвонки) на порту ' + PORT)
 })
