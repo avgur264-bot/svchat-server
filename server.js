@@ -75,7 +75,26 @@ self.addEventListener('push', e => {
     tag: d.tag || 'svchat',
     data: { url: d.url || '/' }
   }
-  e.waitUntil(self.registration.showNotification(title, opts))
+  const bump = new Promise(res => {
+    try {
+      const r = indexedDB.open('svbadge', 1)
+      r.onupgradeneeded = () => r.result.createObjectStore('s')
+      r.onsuccess = () => {
+        try {
+          const tx = r.result.transaction('s', 'readwrite'), st = tx.objectStore('s'), g = st.get('n')
+          g.onsuccess = () => {
+            const n = (g.result || 0) + 1
+            st.put(n, 'n')
+            tx.oncomplete = () => { try { self.navigator.setAppBadge && self.navigator.setAppBadge(n) } catch {} res() }
+            tx.onerror = () => res()
+          }
+          g.onerror = () => res()
+        } catch { res() }
+      }
+      r.onerror = () => res()
+    } catch { res() }
+  })
+  e.waitUntil(Promise.all([self.registration.showNotification(title, opts), bump]))
 })
 self.addEventListener('notificationclick', e => {
   e.notification.close()
