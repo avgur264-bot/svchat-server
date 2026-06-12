@@ -143,6 +143,32 @@ function userList(room) {
   if (!m) return []
   return [...m.values()].map(u => ({ ...u, isAdmin: !!(meta && meta.adminId === u.id) }))
 }
+// ── Личные чаты (Этап 3) ─────────────────────────────────────────────────────
+function isDm(room) { return typeof room === 'string' && room.startsWith('dm:') }
+function dmMembers(room) {
+  const p = String(room).split(':')
+  return p.length === 3 && p[1] && p[2] ? [p[1], p[2]] : null
+}
+function dmRoomId(a, b) {
+  const ids = [String(a), String(b)].sort()
+  return 'dm:' + ids[0] + ':' + ids[1]
+}
+// Push конкретному человеку по userId — ищем его подписки во всех комнатах
+async function pushToUser(userId, payload) {
+  const data = JSON.stringify(payload)
+  const seen = new Set()
+  for (const [, m] of pushSubs.entries()) {
+    for (const [endpoint, rec] of [...m.entries()]) {
+      if (rec.userId !== userId || seen.has(endpoint)) continue
+      seen.add(endpoint)
+      try { await webpush.sendNotification(rec.sub, data) } catch (e) {
+        const code = e && e.statusCode
+        if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) }
+      }
+    }
+  }
+}
+
 function onlineTotal() {
   return [...roomUsers.values()].reduce((n, m) => n + m.size, 0)
 }
@@ -280,7 +306,16 @@ io.on('connection', (socket) => {
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
 
-    if (!occupied) {
+    if (isDm(room)) {
+      // Личная комната: доступ только двум участникам по их ID, пароли не используются
+      const mm = dmMembers(room)
+      if (!mm || !mm.includes(String(user.id))) {
+        socket.emit('join_error', { reason: 'no_access' })
+        return
+      }
+      meta = meta || { password: null, adminId: null }
+      roomMeta.set(room, meta)
+    } else if (!occupied) {
       const prev = roomMeta.get(room)
       if (prev && prev.password) {
         if (prev.password !== password) {
@@ -348,6 +383,17 @@ io.on('connection', (socket) => {
     dbSaveMsg(currentRoom, entry)
 
     // Push тем, у кого приложение закрыто
+    if (isDm(currentRoom)) {
+      const mm = dmMembers(currentRoom) || []
+      const other = mm.find(x => x !== String(me.id))
+      if (other) pushToUser(other, {
+        title: '\u{1F4AC} ' + me.name,
+        body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
+        tag: 'svchat-' + currentRoom,
+        url: '/?room=' + encodeURIComponent(currentRoom) + '&dm=' + encodeURIComponent(me.name)
+      }).catch(() => {})
+      return
+    }
     pushToRoom(currentRoom, me.id, {
       title: me.name + ' · ' + currentRoom,
       body: entry.msgType === 'photo' ? '📷 Фото' : entry.msgType === 'video' ? '🎬 Видео' : entry.msgType === 'voice' ? '🎤 Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
@@ -379,6 +425,30 @@ io.on('connection', (socket) => {
     io.to(currentRoom).emit('users', { users: userList(currentRoom) })
   })
 
+  socket.on('dm_invite', (p = {}) => {
+    if (!currentRoom || !me) return
+    const targetId = String(p.targetId || '')
+    if (!targetId || targetId === String(me.id)) return
+    const dm = dmRoomId(me.id, targetId)
+    // Живым сокетам адресата в текущей комнате — событие-приглашение
+    const m = roomUsers.get(currentRoom)
+    if (m) {
+      for (const [sockId, u] of m.entries()) {
+        if (String(u.id) === targetId) {
+          const ts = io.sockets.sockets.get(sockId)
+          if (ts) ts.emit('dm_invited', { room: dm, fromId: String(me.id), fromName: me.name })
+        }
+      }
+    }
+    // И push, если приложение закрыто
+    pushToUser(targetId, {
+      title: me.name,
+      body: '\u{1F4AC} приглашает вас в личный чат',
+      tag: 'svchat-' + dm,
+      url: '/?room=' + encodeURIComponent(dm) + '&dm=' + encodeURIComponent(me.name)
+    }).catch(() => {})
+  })
+
   socket.on('signal', (data = {}) => {
     if (!currentRoom) return
     socket.to(currentRoom).emit('signal', { from: me && me.id, data: data.data, target: data.target })
@@ -395,5 +465,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 2: push + база) на порту ' + PORT)
+  console.log('SVchat server (Этап 3: личные чаты) на порту ' + PORT)
 })
