@@ -855,5 +855,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v40: иконка SV chat) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v41: звук новых сообщений) на порту ' + PORT)
 })
