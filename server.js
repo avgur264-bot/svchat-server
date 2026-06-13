@@ -848,6 +848,25 @@ io.on('connection', (socket) => {
     }).catch(() => {})
   })
 
+  // Групповой звонок: push всем участникам группы, кого нет в комнате
+  socket.on('group_call', () => {
+    if (!currentRoom || !me || isDm(currentRoom)) return
+    if (!allow('dm', 5, 30000)) return
+    const online = onlineIdsIn(currentRoom)
+    const reg = roomMembers.get(currentRoom)
+    if (!reg) return
+    for (const [uid] of reg.entries()) {
+      if (String(uid) === String(me.id) || online.has(String(uid))) continue
+      pushToUser(String(uid), {
+        title: '\u{1F4F9} ' + me.name,
+        body: 'Групповой видеозвонок — нажмите, чтобы войти',
+        tag: 'svgcall-' + currentRoom,
+        room: currentRoom,
+        url: '/?room=' + encodeURIComponent(currentRoom)
+      }).catch(() => {})
+    }
+  })
+
   socket.on('set_room_avatar', (p = {}) => {
     if (!currentRoom || !me) return
     if (isDm(currentRoom)) return
@@ -880,5 +899,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v52: фото в базе) на порту ' + PORT)
+  console.log('SVchat server (v53: групповой звонок push) на порту ' + PORT)
 })
