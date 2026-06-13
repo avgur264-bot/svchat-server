@@ -855,5 +855,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v42: фикс воспроизведения звука) на порту ' + PORT)
+  console.log('SVchat server (Этап 4 v43: звук ICQ) на порту ' + PORT)
 })
