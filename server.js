@@ -361,8 +361,9 @@ self.addEventListener('push', e => {
     body: d.body || 'Новое сообщение',
     icon: '/icon-192.png',
     badge: '/icon-192.png',
-    tag: d.tag || 'svchat',
-    data: { url: d.url || '/' }
+    tag: d.room ? 'svchat-' + d.room : (d.tag || 'svchat'),
+    renotify: true,
+    data: { url: d.url || '/', room: d.room || '' }
   }
   const bump = new Promise(res => {
     try {
@@ -388,12 +389,19 @@ self.addEventListener('push', e => {
 self.addEventListener('notificationclick', e => {
   e.notification.close()
   const url = (e.notification.data && e.notification.data.url) || '/'
+  const room = (e.notification.data && e.notification.data.room) || ''
+  // Сброс бейджа при клике
+  try {
+    const r = indexedDB.open('svbadge', 1)
+    r.onsuccess = () => { try { r.result.transaction('s','readwrite').objectStore('s').put(0,'n') } catch {} }
+  } catch {}
+  try { self.navigator.clearAppBadge && self.navigator.clearAppBadge() } catch {}
   e.waitUntil((async () => {
     const all = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     for (const c of all) {
       try {
         await c.focus()
-        c.postMessage({ type: 'open-room', url })
+        c.postMessage({ type: 'open-room', url, room })
         return
       } catch {}
     }
@@ -660,6 +668,7 @@ io.on('connection', (socket) => {
         title: '\u{1F4AC} ' + me.name,
         body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
         tag: 'svchat-' + currentRoom,
+        room: currentRoom,
         url: '/?room=' + encodeURIComponent(currentRoom) + '&dm=' + encodeURIComponent(me.name)
       }).catch(() => {})
       return
@@ -668,6 +677,7 @@ io.on('connection', (socket) => {
       title: me.name + ' · ' + currentRoom,
       body: entry.msgType === 'photo' ? '📷 Фото' : entry.msgType === 'video' ? '🎬 Видео' : entry.msgType === 'voice' ? '🎤 Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
       tag: 'svchat-' + currentRoom,
+      room: currentRoom,
       url: '/?room=' + encodeURIComponent(currentRoom)
     }).catch(() => {})
   })
@@ -814,6 +824,7 @@ io.on('connection', (socket) => {
       title: me.name,
       body: '\u{1F4AC} приглашает вас в личный чат',
       tag: 'svchat-' + dm,
+      room: dm,
       url: '/?room=' + encodeURIComponent(dm) + '&dm=' + encodeURIComponent(me.name)
     }).catch(() => {})
   })
