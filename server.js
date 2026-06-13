@@ -252,11 +252,11 @@ function memberList(room) {
   const out = []
   const reg = roomMembers.get(room)
   if (reg) for (const [id, rec] of reg.entries()) {
-    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: rec.lastSeen || null })
+    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: rec.lastSeen || null, photo: rec.photo || null })
   }
   // онлайн-пользователи, которых ещё нет в реестре (режим памяти без базы)
   if (m) for (const u of m.values()) {
-    if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, isAdmin: adminId === u.id, lastSeen: null })
+    if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, isAdmin: adminId === u.id, lastSeen: null, photo: u.photo || null })
   }
   out.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), 'ru'))
   return out
@@ -271,7 +271,8 @@ function onlineIdsIn(room) {
 
 function touchMember(room, user) {
   if (!roomMembers.has(room)) roomMembers.set(room, new Map())
-  roomMembers.get(room).set(String(user.id), { name: user.name, lastSeen: new Date().toISOString() })
+  const prev = roomMembers.get(room).get(String(user.id))
+  roomMembers.get(room).set(String(user.id), { name: user.name, lastSeen: new Date().toISOString(), photo: (user.photo || (prev && prev.photo)) || null })
   dbSaveMember(room, String(user.id), user.name)
 }
 
@@ -471,10 +472,11 @@ const server = http.createServer(async (req, res) => {
           id: uid,
           name: (info && info.name) || 'Без имени',
           lastSeen: (info && info.lastSeen) || null,
-          online: online.has(uid)
+          online: online.has(uid),
+          photo: (info && info.photo) || null
         }
         if (!prev || cand.online || (cand.lastSeen && (!prev.lastSeen || cand.lastSeen > prev.lastSeen))) {
-          seen.set(uid, prev ? Object.assign(prev, { online: prev.online || cand.online, lastSeen: cand.lastSeen || prev.lastSeen, name: cand.name }) : cand)
+          seen.set(uid, prev ? Object.assign(prev, { online: prev.online || cand.online, lastSeen: cand.lastSeen || prev.lastSeen, name: cand.name, photo: cand.photo || prev.photo }) : cand)
         }
       }
     }
@@ -543,7 +545,7 @@ io.on('connection', (socket) => {
     await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
-    const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40) }
+    const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40), photo: (p.photo && typeof p.photo === 'string' && p.photo.startsWith('data:image/') && p.photo.length < 400000) ? p.photo : null }
 
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
@@ -876,5 +878,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (Этап 4 v43: звук ICQ) на порту ' + PORT)
+  console.log('SVchat server (v51: фото-аватары) на порту ' + PORT)
 })
