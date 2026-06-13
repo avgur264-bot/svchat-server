@@ -844,6 +844,16 @@ io.on('connection', (socket) => {
     }).catch(() => {})
   })
 
+  socket.on('set_room_avatar', (p = {}) => {
+    if (!currentRoom || !me) return
+    if (isDm(currentRoom)) return
+    const meta = roomMeta.get(currentRoom)
+    const isAdmin = meta && meta.adminId === me.id
+    if (!isAdmin) return // только админ
+    const avatar = p.avatar && typeof p.avatar === 'string' && p.avatar.startsWith('data:image/') && p.avatar.length < 500000 ? p.avatar : null
+    io.to(currentRoom).emit('room_avatar', { room: currentRoom, avatar })
+  })
+
   socket.on('signal', (data = {}) => {
     if (!currentRoom) return
     if (!allow('signal', 40, 10000)) return
