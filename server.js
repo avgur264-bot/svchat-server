@@ -50,6 +50,9 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
+const accounts = new Map()      // nick_key -> {nick, userId, passHash}: уникальные ники
+const accountByUid = new Map()  // userId -> nick_key
+function nickKey(s){ return String(s || '').trim().toLowerCase() }
 
 // ── База данных (Этап 2): Postgres через DATABASE_URL ────────────────────────
 // Если переменная не задана — сервер работает как раньше (всё в памяти).
@@ -114,6 +117,9 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_auth (user_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL)`)
     const authRows = await pool.query(`SELECT user_id, token_hash FROM svchat_auth`)
     for (const r of authRows.rows) userAuth.set(r.user_id, r.token_hash)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_accounts (nick_key TEXT PRIMARY KEY, nick TEXT NOT NULL, user_id TEXT NOT NULL, pass_hash TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`)
+    const accRows = await pool.query(`SELECT nick_key, nick, user_id, pass_hash FROM svchat_accounts`)
+    for (const r of accRows.rows) { accounts.set(r.nick_key, { nick: r.nick, userId: r.user_id, passHash: r.pass_hash }); accountByUid.set(r.user_id, r.nick_key) }
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -165,6 +171,25 @@ async function dbSaveAuth(userId, tokenHash) {
   try {
     await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbSaveAccount(key, nick, userId, passHash) {
+  if (!pool) return
+  try {
+    await pool.query(`INSERT INTO svchat_accounts (nick_key, nick, user_id, pass_hash) VALUES ($1,$2,$3,$4) ON CONFLICT (nick_key) DO UPDATE SET nick = EXCLUDED.nick, user_id = EXCLUDED.user_id, pass_hash = EXCLUDED.pass_hash`, [key, nick, userId, passHash])
+  } catch (e) { console.error('[db] account:', e.message) }
+}
+async function dbDelAccount(key, userId) {
+  if (!pool) return
+  try {
+    await pool.query(`DELETE FROM svchat_accounts WHERE nick_key = $1`, [key])
+    await pool.query(`DELETE FROM svchat_auth WHERE user_id = $1`, [userId])
+  } catch (e) { console.error('[db] account del:', e.message) }
+}
+function releaseAccount(uid) {
+  const key = accountByUid.get(uid)
+  if (!key) return
+  accounts.delete(key); accountByUid.delete(uid); userAuth.delete(uid)
+  dbDelAccount(key, uid)
 }
 async function dbSaveRoom(room, meta) {
   if (!pool) return
@@ -586,6 +611,9 @@ io.on('connection', (socket) => {
     } else if (auth) {
       const th = hashTok(auth); userAuth.set(user.id, th); dbSaveAuth(user.id, th)
     }
+    // Зарегистрированный аккаунт: ник берём с сервера, подделать нельзя
+    const aKey = accountByUid.get(user.id)
+    if (aKey && accounts.get(aKey)) user.name = accounts.get(aKey).nick
 
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
@@ -876,6 +904,58 @@ io.on('connection', (socket) => {
   })
 
   // Удаление контакта: чистим запись человека (по id и по имени — дубли) из реестра твоих комнат
+  // Регистрация-или-вход по уникальному нику + паролю
+  socket.on('auth_account', async (p = {}, ack) => {
+    if (typeof ack !== 'function') return
+    if (!allow('join', 20, 30000)) { ack({ ok: false, reason: 'rate_limited' }); return }
+    await dbReady
+    const nick = String(p.nick || '').trim().slice(0, 40)
+    const password = String(p.password || '')
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    if (nick.length < 2 || password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
+    const key = nickKey(nick)
+    const existing = accounts.get(key)
+    if (existing) {
+      if (!verifyPassword(password, existing.passHash)) { ack({ ok: false, reason: 'wrong_password' }); return }
+      if (token) { const th = hashTok(token); userAuth.set(existing.userId, th); dbSaveAuth(existing.userId, th) }
+      ack({ ok: true, userId: existing.userId, nick: existing.nick })
+      return
+    }
+    const userId = (String(p.userId || '').slice(0, 80)) || ('u-' + crypto.randomBytes(8).toString('hex'))
+    const passHash = hashPassword(password)
+    accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
+    dbSaveAccount(key, nick, userId, passHash)
+    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+    ack({ ok: true, userId, nick, created: true })
+  })
+
+  // Установить/сменить пароль своего аккаунта (для тех, кто зашёл до появления аккаунтов)
+  socket.on('account_set_password', async (p = {}, ack) => {
+    if (typeof ack !== 'function') return
+    if (!allow('join', 20, 30000)) { ack({ ok: false, reason: 'rate_limited' }); return }
+    await dbReady
+    const password = String(p.password || '')
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    const userId = String(p.userId || '').slice(0, 80)
+    const nick = String(p.nick || '').trim().slice(0, 40)
+    if (!userId || nick.length < 2 || password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
+    const myKey = accountByUid.get(userId)
+    if (myKey && accounts.get(myKey)) {
+      const acc = accounts.get(myKey); const passHash = hashPassword(password)
+      acc.passHash = passHash; dbSaveAccount(myKey, acc.nick, userId, passHash)
+      if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+      ack({ ok: true, userId, nick: acc.nick, changed: true }); return
+    }
+    const key = nickKey(nick)
+    const existing = accounts.get(key)
+    if (existing && existing.userId !== userId) { ack({ ok: false, reason: 'nick_taken' }); return }
+    const passHash = hashPassword(password)
+    accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
+    dbSaveAccount(key, nick, userId, passHash)
+    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+    ack({ ok: true, userId, nick })
+  })
+
   socket.on('contact_remove', (p = {}) => {
     if (!me) return
     if (!allow('dm', 10, 30000)) return
@@ -895,6 +975,7 @@ io.on('connection', (socket) => {
         const allowed = isAdmin || uid === String(me.id) // админ — любого; остальные — только себя
         if (!allowed) continue
         reg.delete(uid); dbDelMember(room, uid); changed = true
+        if (isAdmin && uid !== String(me.id)) releaseAccount(uid) // сброс аккаунта админом: ник освобождается
       }
       if (changed) broadcastMembers(room)
     }
@@ -966,5 +1047,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v59: привязка аккаунта + заголовки) на порту ' + PORT)
+  console.log('SVchat server (v61: установка пароля в настройках) на порту ' + PORT)
 })
