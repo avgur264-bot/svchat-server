@@ -482,7 +482,18 @@ const server = http.createServer(async (req, res) => {
         }
       }
     }
-    const list = Array.from(seen.values()).sort((a, b) =>
+    const byName = new Map()
+    for (const cand of seen.values()) {
+      const key = (String(cand.name || '').trim().toLowerCase()) || ('id:' + cand.id)
+      const prev = byName.get(key)
+      if (!prev) { byName.set(key, cand); continue }
+      if (!prev.photo && cand.photo) prev.photo = cand.photo
+      const better = (cand.online && !prev.online) ||
+        (cand.online === prev.online && String(cand.lastSeen || '') > String(prev.lastSeen || ''))
+      if (better) { if (!cand.photo && prev.photo) cand.photo = prev.photo; cand.online = cand.online || prev.online; byName.set(key, cand) }
+      else if (cand.online) prev.online = true
+    }
+    const list = Array.from(byName.values()).sort((a, b) =>
       (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ contacts: list }))
@@ -808,29 +819,56 @@ io.on('connection', (socket) => {
   })
 
   socket.on('dm_invite', (p = {}) => {
-    if (!currentRoom || !me) return
+    if (!me) return
     if (!allow('dm', 5, 30000)) return
     const targetId = String(p.targetId || '')
     if (!targetId || targetId === String(me.id)) return
     const dm = dmRoomId(me.id, targetId)
-    // Живым сокетам адресата в текущей комнате — событие-приглашение
-    const m = roomUsers.get(currentRoom)
-    if (m) {
-      for (const [sockId, u] of m.entries()) {
-        if (String(u.id) === targetId) {
+    // Доставляем приглашение всем живым сокетам адресата, где бы он ни был в приложении
+    let deliveredLive = false
+    const sentTo = new Set()
+    for (const [, mm] of roomUsers.entries()) {
+      for (const [sockId, u] of mm.entries()) {
+        if (String(u.id) === targetId && !sentTo.has(sockId)) {
+          sentTo.add(sockId)
           const ts = io.sockets.sockets.get(sockId)
-          if (ts) ts.emit('dm_invited', { room: dm, fromId: String(me.id), fromName: me.name })
+          if (ts) { ts.emit('dm_invited', { room: dm, fromId: String(me.id), fromName: me.name }); deliveredLive = true }
         }
       }
     }
-    // И push, если приложение закрыто (онлайн-адресат получает живое событие)
-    if (!onlineIdsIn(currentRoom).has(targetId)) pushToUser(targetId, {
+    // Если адресат нигде не онлайн — push
+    if (!deliveredLive) pushToUser(targetId, {
       title: me.name,
       body: '\u{1F4AC} приглашает вас в личный чат',
       tag: 'svchat-' + dm,
       room: dm,
       url: '/?room=' + encodeURIComponent(dm) + '&dm=' + encodeURIComponent(me.name)
     }).catch(() => {})
+  })
+
+  // Удаление контакта: чистим запись человека (по id и по имени — дубли) из реестра твоих комнат
+  socket.on('contact_remove', (p = {}) => {
+    if (!me) return
+    if (!allow('dm', 10, 30000)) return
+    const targetId = String(p.targetId || '')
+    const name = String(p.name || '').trim().toLowerCase()
+    if (!targetId && !name) return
+    const rooms = Array.isArray(p.rooms) ? p.rooms.map(x => String(x).slice(0, 64)).slice(0, 100) : []
+    for (const room of rooms) {
+      const reg = roomMembers.get(room)
+      if (!reg || !reg.has(String(me.id))) continue // только твои комнаты
+      let changed = false
+      const meta = roomMeta.get(room)
+      const isAdmin = !!(meta && String(meta.adminId) === String(me.id))
+      for (const [uid, rec] of [...reg.entries()]) {
+        const match = (targetId && uid === targetId) || (name && String((rec && rec.name) || '').trim().toLowerCase() === name)
+        if (!match) continue
+        const allowed = isAdmin || uid === String(me.id) // админ — любого; остальные — только себя
+        if (!allowed) continue
+        reg.delete(uid); dbDelMember(room, uid); changed = true
+      }
+      if (changed) broadcastMembers(room)
+    }
   })
 
   // Звонок: уведомить второго участника лички, если он не в комнате
@@ -899,5 +937,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v54: групповой звонок push) на порту ' + PORT)
+  console.log('SVchat server (v57: права удаления) на порту ' + PORT)
 })
