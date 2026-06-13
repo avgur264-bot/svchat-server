@@ -194,6 +194,13 @@ async function dbLoadHistory(room) {
     return r.rows.map(x => x.entry)
   } catch (e) { console.error('[db] история:', e.message); return null }
 }
+async function dbGetMsg(room, id) {
+  if (!pool) return null
+  try {
+    const r = await pool.query(`SELECT entry FROM svchat_messages WHERE room = $1 AND id = $2 LIMIT 1`, [room, id])
+    return r.rows[0] ? r.rows[0].entry : null
+  } catch (e) { return null }
+}
 async function dbSaveSub(room, userId, sub) {
   if (!pool || !sub || !sub.endpoint) return
   try {
@@ -667,7 +674,7 @@ io.on('connection', (socket) => {
     // Защита памяти: тяжёлые медиа в истории комнаты суммарно не больше ~60 МБ
     let mediaBytes = 0
     for (const e of h) mediaBytes += (e.dataUrl ? e.dataUrl.length : 0)
-    while (mediaBytes > 60e6 && h.length > 1) {
+    while (mediaBytes > 25e6 && h.length > 1) {
       const dropped = h.shift()
       mediaBytes -= (dropped.dataUrl ? dropped.dataUrl.length : 0)
     }
@@ -719,13 +726,15 @@ io.on('connection', (socket) => {
 
   // Реакция на сообщение: тоггл эмодзи от пользователя
   // Догрузка медиа конкретного сообщения (ленивая загрузка)
-  socket.on('get_media', (p = {}, ack) => {
+  socket.on('get_media', async (p = {}, ack) => {
     if (typeof ack !== 'function') return
     if (!currentRoom || !me) { ack({ ok: false }); return }
     if (!allow('med', 60, 10000)) { ack({ ok: false, error: 'rate_limited' }); return }
     const id = String(p.id || '')
     const entry = getHistory(currentRoom).find(e => e.id === id)
-    if (entry && entry.dataUrl) ack({ ok: true, dataUrl: entry.dataUrl })
+    if (entry && entry.dataUrl) { ack({ ok: true, dataUrl: entry.dataUrl }); return }
+    const fromDb = await dbGetMsg(currentRoom, id) // вытеснено из памяти — берём из базы
+    if (fromDb && fromDb.dataUrl) ack({ ok: true, dataUrl: fromDb.dataUrl })
     else ack({ ok: false })
   })
 
@@ -937,5 +946,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v57: права удаления) на порту ' + PORT)
+  console.log('SVchat server (v58: память + ленивое медиа из базы) на порту ' + PORT)
 })
