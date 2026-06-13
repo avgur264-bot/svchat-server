@@ -48,6 +48,8 @@ const roomReads = new Map()   // room -> Map<userId, ISO-время послед
 const roomDelivs = new Map()  // room -> Map<userId, ISO-время последнего доставленного на устройство>
 const roomUsers = new Map()
 const roomMeta = new Map()
+const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
+function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
 
 // ── База данных (Этап 2): Postgres через DATABASE_URL ────────────────────────
 // Если переменная не задана — сервер работает как раньше (всё в памяти).
@@ -109,6 +111,9 @@ const dbReady = (async () => {
       if (!roomDelivs.has(r.room)) roomDelivs.set(r.room, new Map())
       roomDelivs.get(r.room).set(r.user_id, r.ts)
     }
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_auth (user_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL)`)
+    const authRows = await pool.query(`SELECT user_id, token_hash FROM svchat_auth`)
+    for (const r of authRows.rows) userAuth.set(r.user_id, r.token_hash)
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -155,6 +160,12 @@ async function backfillMembers() {
 }
 dbReady.then(ok => { if (ok) setTimeout(() => backfillMembers(), 3000) })
 
+async function dbSaveAuth(userId, tokenHash) {
+  if (!pool) return
+  try {
+    await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
+  } catch (e) { console.error('[db] auth:', e.message) }
+}
 async function dbSaveRoom(room, meta) {
   if (!pool) return
   try {
@@ -530,7 +541,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
   } else if (appHtml) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate' })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN' })
     res.end(appHtml)
   } else {
     res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -566,6 +577,15 @@ io.on('connection', (socket) => {
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
     const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40), photo: (p.photo && typeof p.photo === 'string' && p.photo.startsWith('data:image/') && p.photo.length < 400000) ? p.photo : null }
+
+    // Привязка аккаунта к секрет-токену (TOFU): claimed id требует совпадения токена
+    const auth = p.auth ? String(p.auth).slice(0, 128) : ''
+    const claimed = userAuth.get(user.id)
+    if (claimed) {
+      if (!auth || hashTok(auth) !== claimed) { socket.emit('join_error', { reason: 'id_taken' }); return }
+    } else if (auth) {
+      const th = hashTok(auth); userAuth.set(user.id, th); dbSaveAuth(user.id, th)
+    }
 
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
@@ -946,5 +966,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v58: память + ленивое медиа из базы) на порту ' + PORT)
+  console.log('SVchat server (v59: привязка аккаунта + заголовки) на порту ' + PORT)
 })
