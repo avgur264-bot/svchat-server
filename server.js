@@ -555,6 +555,29 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ iceServers }))
+  } else if (url === '/summary' && req.method === 'POST') {
+    const b = await readBody(req)
+    const meId = String((b && b.me) || '').slice(0, 80)
+    const rooms = Array.isArray(b && b.rooms) ? b.rooms.slice(0, 100) : []
+    const summary = {}
+    for (const it of rooms) {
+      const room = String((it && it.room) || '').slice(0, 64)
+      if (!room) continue
+      const since = String((it && it.since) || '')
+      let count = 0
+      if (pool) {
+        try {
+          const r = await pool.query(`SELECT count(*)::int AS c FROM svchat_messages WHERE room = $1 AND (entry->>'from') <> $2 AND ($3 = '' OR (entry->>'time') > $3)`, [room, meId, since])
+          count = (r.rows[0] && r.rows[0].c) || 0
+        } catch (e) { count = 0 }
+      } else {
+        const h = getHistory(room)
+        for (const e of h) if (String(e.from) !== meId && (!since || (e.time || '') > since)) count++
+      }
+      summary[room] = { count }
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ summary }))
   } else if (url === '/subscribe' && req.method === 'POST') {
     const b = await readBody(req)
     if (b && b.room && b.subscription) {
@@ -1047,5 +1070,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v61: установка пароля в настройках) на порту ' + PORT)
+  console.log('SVchat server (v62: непрочитанные в списке чатов) на порту ' + PORT)
 })
