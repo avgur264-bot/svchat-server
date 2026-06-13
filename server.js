@@ -899,5 +899,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v53: групповой звонок push) на порту ' + PORT)
+  console.log('SVchat server (v54: групповой звонок push) на порту ' + PORT)
 })
