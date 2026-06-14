@@ -585,16 +585,20 @@ const server = http.createServer(async (req, res) => {
     const onlineSet = new Set()
     for (const m of roomUsers.values()) for (const u of m.values()) if (u && u.id) onlineSet.add(String(u.id))
     const byName = new Map()
-    for (const a of accounts.values()) {
-      const key = String(a.nick || '').trim().toLowerCase()
-      if (!key || String(a.userId) === meId) continue
-      if (!byName.has(key)) byName.set(key, { id: a.userId, name: a.nick, online: onlineSet.has(String(a.userId)) })
+    const addUser = (uid, nm) => {
+      const key = String(nm || '').trim().toLowerCase()
+      if (!key || String(uid) === meId) return
+      if (!byName.has(key)) byName.set(key, { id: String(uid), name: nm, online: onlineSet.has(String(uid)) })
     }
+    for (const a of accounts.values()) addUser(a.userId, a.nick)
+    for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) addUser(uid, info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ ok: true, users: [...byName.values()].slice(0, 500) }))
   } else if (url === '/stats') {
     const uniqNames = new Set()
-    for (const a of accounts.values()) uniqNames.add(String(a.nick || '').trim().toLowerCase())
+    const addName = nm => { const k = String(nm || '').trim().toLowerCase(); if (k) uniqNames.add(k) }
+    for (const a of accounts.values()) addName(a.nick)
+    for (const m of roomMembers.values()) for (const [, info] of m.entries()) addName(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ ok: true, users: uniqNames.size, online: (io && io.engine ? io.engine.clientsCount : 0) }))
   } else if (url === '/find') {
@@ -1165,5 +1169,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v79: список зарегистрированных (/users) + счётчик уникальных имён + E2E) на порту ' + PORT)
+  console.log('SVchat server (v80: список/счётчик из всех участников чатов (не только новых аккаунтов)) на порту ' + PORT)
 })
