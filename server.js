@@ -584,23 +584,30 @@ const server = http.createServer(async (req, res) => {
     const meId = String(new URLSearchParams((req.url || '').split('?')[1] || '').get('me') || '')
     const onlineSet = new Set()
     for (const m of roomUsers.values()) for (const u of m.values()) if (u && u.id) onlineSet.add(String(u.id))
-    const byName = new Map()
+    const norm = s => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '')
+    const byKey = new Map()
     const addUser = (uid, nm) => {
-      const key = String(nm || '').trim().toLowerCase()
-      if (!key || String(uid) === meId) return
-      if (!byName.has(key)) byName.set(key, { id: String(uid), name: nm, online: onlineSet.has(String(uid)) })
+      const id = String(uid || '')
+      const nme = String(nm || '').trim()
+      if (!id || !nme || id === meId) return
+      const key = norm(nme) || nme.toLowerCase()
+      const online = onlineSet.has(id)
+      const prev = byKey.get(key)
+      if (!prev) { byKey.set(key, { id, name: nme, online }); return }
+      if (online && !prev.online) { prev.id = id; prev.online = true }
     }
     for (const a of accounts.values()) addUser(a.userId, a.nick)
     for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) addUser(uid, info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: [...byName.values()].slice(0, 500) }))
+    res.end(JSON.stringify({ ok: true, users: [...byKey.values()].slice(0, 500) }))
   } else if (url === '/stats') {
-    const uniqNames = new Set()
-    const addName = nm => { const k = String(nm || '').trim().toLowerCase(); if (k) uniqNames.add(k) }
-    for (const a of accounts.values()) addName(a.nick)
-    for (const m of roomMembers.values()) for (const [, info] of m.entries()) addName(info && info.name)
+    const norm = s => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '')
+    const keys = new Set()
+    const add = nm => { const k = norm(nm); if (k) keys.add(k) }
+    for (const a of accounts.values()) add(a.nick)
+    for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: uniqNames.size, online: (io && io.engine ? io.engine.clientsCount : 0) }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 83 }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1169,5 +1176,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v80: список/счётчик из всех участников чатов (не только новых аккаунтов)) на порту ' + PORT)
+  console.log('SVchat server (v83: жёсткая нормализация имён (без знаков/пробелов, NFKC) + ver в /stats) на порту ' + PORT)
 })
