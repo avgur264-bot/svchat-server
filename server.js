@@ -51,6 +51,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
+const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const owners = new Set() // userId владельцев (права админа во всех группах)
 const pubKeys = new Map() // userId -> публичный ключ ECDH (для E2E личных чатов)
 function isOwner(uid){ return !!uid && owners.has(uid) }
@@ -130,6 +131,9 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_keys (user_id TEXT PRIMARY KEY, pub TEXT NOT NULL)`)
     const keyRows = await pool.query(`SELECT user_id, pub FROM svchat_keys`)
     for (const r of keyRows.rows) pubKeys.set(r.user_id, r.pub)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_hidden (user_id TEXT PRIMARY KEY)`)
+    const hidRows = await pool.query(`SELECT user_id FROM svchat_hidden`)
+    for (const r of hidRows.rows) hiddenUsers.add(r.user_id)
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -181,6 +185,13 @@ async function dbSaveAuth(userId, tokenHash) {
   try {
     await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbSaveHidden(userId, hidden) {
+  if (!pool) return
+  try {
+    if (hidden) await pool.query(`INSERT INTO svchat_hidden (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId])
+    else await pool.query(`DELETE FROM svchat_hidden WHERE user_id = $1`, [userId])
+  } catch (e) { console.error('[db] hidden:', e.message) }
 }
 async function dbSaveKey(userId, pub) {
   if (!pool) return
@@ -590,6 +601,7 @@ const server = http.createServer(async (req, res) => {
       const id = String(uid || '')
       const nme = String(nm || '').trim()
       if (!id || !nme || id === meId) return
+      if (hiddenUsers.has(id)) return
       const key = norm(nme) || nme.toLowerCase()
       const online = onlineSet.has(id)
       const prev = byKey.get(key)
@@ -607,7 +619,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) add(a.nick)
     for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 83 }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 84 }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1047,6 +1059,15 @@ io.on('connection', (socket) => {
   })
 
   // Установить/сменить пароль своего аккаунта (для тех, кто зашёл до появления аккаунтов)
+  socket.on('set_visibility', (p = {}) => {
+    const userId = String(p.userId || '').slice(0, 80)
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    if (!userId || !ownsUid(userId, token)) return
+    const hidden = !!p.hidden
+    if (hidden) hiddenUsers.add(userId); else hiddenUsers.delete(userId)
+    dbSaveHidden(userId, hidden)
+  })
+
   socket.on('account_set_password', async (p = {}, ack) => {
     if (typeof ack !== 'function') return
     if (!allow('join', 20, 30000)) { ack({ ok: false, reason: 'rate_limited' }); return }
@@ -1176,5 +1197,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v83: жёсткая нормализация имён (без знаков/пробелов, NFKC) + ver в /stats) на порту ' + PORT)
+  console.log('SVchat server (v84: приватность справочника (скрытие из контактов) + set_visibility) на порту ' + PORT)
 })
