@@ -579,6 +579,19 @@ const server = http.createServer(async (req, res) => {
     const pub = id ? pubKeys.get(id) : null
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify(pub ? { ok: true, pub } : { ok: false }))
+  } else if (url === '/users') {
+    await dbReady
+    const meId = String(new URLSearchParams((req.url || '').split('?')[1] || '').get('me') || '')
+    const onlineSet = new Set()
+    for (const m of roomUsers.values()) for (const u of m.values()) if (u && u.id) onlineSet.add(String(u.id))
+    const byName = new Map()
+    for (const a of accounts.values()) {
+      const key = String(a.nick || '').trim().toLowerCase()
+      if (!key || String(a.userId) === meId) continue
+      if (!byName.has(key)) byName.set(key, { id: a.userId, name: a.nick, online: onlineSet.has(String(a.userId)) })
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify({ ok: true, users: [...byName.values()].slice(0, 500) }))
   } else if (url === '/stats') {
     const uniqNames = new Set()
     for (const a of accounts.values()) uniqNames.add(String(a.nick || '').trim().toLowerCase())
@@ -1152,5 +1165,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v78: счётчик уникальных имён + ключи в БД + история + E2E медиа) на порту ' + PORT)
+  console.log('SVchat server (v79: список зарегистрированных (/users) + счётчик уникальных имён + E2E) на порту ' + PORT)
 })
