@@ -52,6 +52,9 @@ const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
+const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
+const seenAt = new Map() // userId -> ISO: время последнего выхода
+const readHidden = new Set() // userId: скрывает статус прочтения (реципрокно, кроме владельца)
 const owners = new Set() // userId владельцев (права админа во всех группах)
 const pubKeys = new Map() // userId -> публичный ключ ECDH (для E2E личных чатов)
 function isOwner(uid){ return !!uid && owners.has(uid) }
@@ -134,6 +137,12 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_hidden (user_id TEXT PRIMARY KEY)`)
     const hidRows = await pool.query(`SELECT user_id FROM svchat_hidden`)
     for (const r of hidRows.rows) hiddenUsers.add(r.user_id)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_seen (user_id TEXT PRIMARY KEY, ts TEXT NOT NULL)`)
+    const seenRows = await pool.query(`SELECT user_id, ts FROM svchat_seen`)
+    for (const r of seenRows.rows) seenAt.set(r.user_id, r.ts)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_readhide (user_id TEXT PRIMARY KEY)`)
+    const rhRows = await pool.query(`SELECT user_id FROM svchat_readhide`)
+    for (const r of rhRows.rows) readHidden.add(r.user_id)
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -185,6 +194,17 @@ async function dbSaveAuth(userId, tokenHash) {
   try {
     await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbSaveReadHide(userId, hidden) {
+  if (!pool) return
+  try {
+    if (hidden) await pool.query(`INSERT INTO svchat_readhide (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId])
+    else await pool.query(`DELETE FROM svchat_readhide WHERE user_id = $1`, [userId])
+  } catch (e) { console.error('[db] readhide:', e.message) }
+}
+async function dbSaveSeen(userId, ts) {
+  if (!pool) return
+  try { await pool.query(`INSERT INTO svchat_seen (user_id, ts) VALUES ($1,$2) ON CONFLICT (user_id) DO UPDATE SET ts = EXCLUDED.ts`, [userId, ts]) } catch (e) { console.error('[db] seen:', e.message) }
 }
 async function dbSaveHidden(userId, hidden) {
   if (!pool) return
@@ -592,26 +612,29 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(pub ? { ok: true, pub } : { ok: false }))
   } else if (url === '/users') {
     await dbReady
-    const meId = String(new URLSearchParams((req.url || '').split('?')[1] || '').get('me') || '')
-    const onlineSet = new Set()
-    for (const m of roomUsers.values()) for (const u of m.values()) if (u && u.id) onlineSet.add(String(u.id))
+    const qp = new URLSearchParams((req.url || '').split('?')[1] || '')
+    const meId = String(qp.get('me') || '')
+    const showHidden = !!OWNER_KEY && qp.get('owner') === OWNER_KEY
     const norm = s => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '')
     const byKey = new Map()
-    const addUser = (uid, nm) => {
+    const addUser = (uid, nm, ls) => {
       const id = String(uid || '')
       const nme = String(nm || '').trim()
       if (!id || !nme || id === meId) return
-      if (hiddenUsers.has(id)) return
+      const hid = hiddenUsers.has(id)
+      if (hid && !showHidden) return
       const key = norm(nme) || nme.toLowerCase()
-      const online = onlineSet.has(id)
+      const isOn = liveOnline.has(id) && liveOnline.get(id).size > 0
       const prev = byKey.get(key)
-      if (!prev) { byKey.set(key, { id, name: nme, online }); return }
-      if (online && !prev.online) { prev.id = id; prev.online = true }
+      if (!prev) { byKey.set(key, { id, name: nme, online: isOn, hidden: hid, lastSeen: ls || null }); return }
+      if (isOn && !prev.online) { prev.id = id; prev.online = true }
+      if (ls && (!prev.lastSeen || ls > prev.lastSeen)) prev.lastSeen = ls
     }
-    for (const a of accounts.values()) addUser(a.userId, a.nick)
-    for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) addUser(uid, info && info.name)
+    for (const a of accounts.values()) addUser(a.userId, a.nick, null)
+    for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) addUser(uid, info && info.name, info && info.lastSeen)
+    const list = [...byKey.values()].map(v => ({ id: v.id, name: v.name, hidden: v.hidden, online: v.online, lastSeen: seenAt.get(v.id) || v.lastSeen || null })).slice(0, 500)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: [...byKey.values()].slice(0, 500) }))
+    res.end(JSON.stringify({ ok: true, users: list }))
   } else if (url === '/stats') {
     const norm = s => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '')
     const keys = new Set()
@@ -619,7 +642,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) add(a.nick)
     for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 84 }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 87 }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -700,6 +723,8 @@ const io = new Server(server, {
 io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
+  let pUid = null
+  const goOnline = (uid) => { uid = String(uid || ''); if (!uid) return; pUid = uid; if (!liveOnline.has(uid)) liveOnline.set(uid, new Set()); liveOnline.get(uid).add(socket.id) }
   // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
   const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [], med: [], old: [] }
   function allow(kind, max, windowMs) {
@@ -711,12 +736,20 @@ io.on('connection', (socket) => {
     return true
   }
 
+  socket.on('hello', (p = {}) => {
+    const uid = String(p.userId || '').slice(0, 80)
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    if (!uid || !ownsUid(uid, token)) return
+    goOnline(uid)
+  })
+
   socket.on('join', async (p = {}) => {
     if (!allow('join', 20, 30000)) { socket.emit('join_error', { reason: 'rate_limited' }); return }
     await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
     const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40), photo: (p.photo && typeof p.photo === 'string' && p.photo.startsWith('data:image/') && p.photo.length < 400000) ? p.photo : null }
+    goOnline(user.id)
 
     // Привязка аккаунта к секрет-токену (TOFU): claimed id требует совпадения токена
     const auth = p.auth ? String(p.auth).slice(0, 128) : ''
@@ -787,7 +820,12 @@ io.on('connection', (socket) => {
     socket.emit('joined', { room, isAdmin: (!!(meta && meta.adminId === me.id)) || isOwner(me.id), locked: !!(meta && meta.password) })
     socket.emit('history', { messages: h.slice(-HISTORY_INIT).map(liteEntry), more: h.length > HISTORY_INIT })
     const rd = roomReads.get(room)
-    socket.emit('reads_state', { reads: rd ? Object.fromEntries(rd.entries()) : {} })
+    let rdOut = {}
+    if (rd) {
+      if (isOwner(me.id)) rdOut = Object.fromEntries(rd.entries())
+      else if (!readHidden.has(String(me.id))) { for (const [rid, rts] of rd.entries()) if (!readHidden.has(rid)) rdOut[rid] = rts }
+    }
+    socket.emit('reads_state', { reads: rdOut })
     const dv = roomDelivs.get(room)
     socket.emit('delivs_state', { delivs: dv ? Object.fromEntries(dv.entries()) : {} })
     io.to(room).emit('users', { users: userList(room) })
@@ -974,7 +1012,12 @@ io.on('connection', (socket) => {
     if (prev && prev >= ts) return // уже отмечено более позднее
     m.set(String(me.id), ts)
     dbSaveRead(currentRoom, String(me.id), ts)
-    io.to(currentRoom).emit('reads', { userId: String(me.id), ts })
+    const rHidden = readHidden.has(String(me.id))
+    const rm = roomUsers.get(currentRoom)
+    if (rm) for (const [sid, u] of rm.entries()) {
+      const vid = String(u.id)
+      if (isOwner(vid) || (!readHidden.has(vid) && !rHidden)) io.to(sid).emit('reads', { userId: String(me.id), ts })
+    }
   })
 
   socket.on('kick', (p = {}) => {
@@ -1059,6 +1102,15 @@ io.on('connection', (socket) => {
   })
 
   // Установить/сменить пароль своего аккаунта (для тех, кто зашёл до появления аккаунтов)
+  socket.on('set_readhide', (p = {}) => {
+    const userId = String(p.userId || '').slice(0, 80)
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    if (!userId || !ownsUid(userId, token)) return
+    const hidden = !!p.hidden
+    if (hidden) readHidden.add(userId); else readHidden.delete(userId)
+    dbSaveReadHide(userId, hidden)
+  })
+
   socket.on('set_visibility', (p = {}) => {
     const userId = String(p.userId || '').slice(0, 80)
     const token = p.auth ? String(p.auth).slice(0, 128) : ''
@@ -1183,6 +1235,10 @@ io.on('connection', (socket) => {
   })
 
   socket.on('disconnect', () => {
+    if (pUid) {
+      const s = liveOnline.get(pUid)
+      if (s) { s.delete(socket.id); if (s.size === 0) { liveOnline.delete(pUid); const ts = new Date().toISOString(); seenAt.set(pUid, ts); dbSaveSeen(pUid, ts) } }
+    }
     if (currentRoom && roomUsers.has(currentRoom)) {
       roomUsers.get(currentRoom).delete(socket.id)
       if (roomUsers.get(currentRoom).size === 0) roomUsers.delete(currentRoom)
@@ -1197,5 +1253,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v84: приватность справочника (скрытие из контактов) + set_visibility) на порту ' + PORT)
+  console.log('SVchat server (v87: реципрокные статусы прочтения (скрытие + владелец видит всё) set_readhide) на порту ' + PORT)
 })
