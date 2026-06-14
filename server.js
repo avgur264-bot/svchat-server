@@ -50,6 +50,9 @@ const roomDelivs = new Map()  // room -> Map<userId, ISO-время послед
 const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
+const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
+const owners = new Set() // userId владельцев (права админа во всех группах)
+function isOwner(uid){ return !!uid && owners.has(uid) }
 function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
 // Проверка владения userId по TOFU-токену: если id уже привязан к токену — менять привязку/аккаунт может только владелец токена
 function ownsUid(userId, token){ const claimed = userAuth.get(userId); if (!claimed) return true; return !!token && hashTok(token) === claimed }
@@ -554,6 +557,12 @@ const server = http.createServer(async (req, res) => {
       (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ contacts: list }))
+  } else if (url === '/find') {
+    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
+    const nick = String(q.get('nick') || '').trim()
+    const acc = nick.length >= 2 ? accounts.get(nickKey(nick)) : null
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(acc ? { ok: true, userId: acc.userId, nick: acc.nick } : { ok: false }))
   } else if (url === '/ice') {
     const u = process.env.TURN_USERNAME
     const c = process.env.TURN_CREDENTIAL
@@ -684,7 +693,7 @@ io.on('connection', (socket) => {
           dbSaveRoom(room, meta)
         }
       } else {
-        meta = { password: password ? hashPassword(password) : null, adminId: password ? user.id : null }
+        meta = { password: password ? hashPassword(password) : null, adminId: user.id }
         dbSaveRoom(room, meta)
       }
       roomMeta.set(room, meta)
@@ -697,6 +706,7 @@ io.on('connection', (socket) => {
 
     currentRoom = room
     me = user
+    if (OWNER_KEY && p.ownerKey && String(p.ownerKey) === OWNER_KEY) owners.add(me.id)
     socket.join(room)
     if (!roomUsers.has(room)) roomUsers.set(room, new Map())
     roomUsers.get(room).set(socket.id, me)
@@ -710,7 +720,7 @@ io.on('connection', (socket) => {
 
     touchMember(room, me)
 
-    socket.emit('joined', { room, isAdmin: !!(meta && meta.adminId === me.id), locked: !!(meta && meta.password) })
+    socket.emit('joined', { room, isAdmin: (!!(meta && meta.adminId === me.id)) || isOwner(me.id), locked: !!(meta && meta.password) })
     socket.emit('history', { messages: h.slice(-HISTORY_INIT).map(liteEntry), more: h.length > HISTORY_INIT })
     const rd = roomReads.get(room)
     socket.emit('reads_state', { reads: rd ? Object.fromEntries(rd.entries()) : {} })
@@ -873,7 +883,7 @@ io.on('connection', (socket) => {
     const entry = h.find(e => e.id === id)
     if (!entry) return
     const meta = roomMeta.get(currentRoom)
-    const isAdmin = meta && meta.adminId === me.id
+    const isAdmin = (meta && meta.adminId === me.id) || isOwner(me.id)
     if (String(entry.from) !== String(me.id) && !isAdmin) return // нельзя удалять чужое
     entry.deleted = true
     entry.text = ''
@@ -901,7 +911,7 @@ io.on('connection', (socket) => {
   socket.on('kick', (p = {}) => {
     if (!currentRoom || !me) return
     const meta = roomMeta.get(currentRoom)
-    if (!meta || meta.adminId !== me.id) return
+    if (!meta || (meta.adminId !== me.id && !isOwner(me.id))) return
     const targetId = String(p.targetId || '')
     if (!targetId || targetId === me.id) return
     const m = roomUsers.get(currentRoom)
@@ -1019,7 +1029,7 @@ io.on('connection', (socket) => {
       if (!reg || !reg.has(String(me.id))) continue // только твои комнаты
       let changed = false
       const meta = roomMeta.get(room)
-      const isAdmin = !!(meta && String(meta.adminId) === String(me.id))
+      const isAdmin = (!!(meta && String(meta.adminId) === String(me.id))) || isOwner(me.id)
       for (const [uid, rec] of [...reg.entries()]) {
         const match = (targetId && uid === targetId) || (name && String((rec && rec.name) || '').trim().toLowerCase() === name)
         if (!match) continue
@@ -1066,11 +1076,22 @@ io.on('connection', (socket) => {
     }
   })
 
+  socket.on('set_room_password', (p = {}) => {
+    if (!currentRoom || !me) return
+    if (isDm(currentRoom)) return
+    const meta = roomMeta.get(currentRoom)
+    if (!meta || (meta.adminId !== me.id && !isOwner(me.id))) return
+    const pw = p.password != null ? String(p.password).slice(0, 64) : ''
+    meta.password = pw ? hashPassword(pw) : null
+    roomMeta.set(currentRoom, meta)
+    dbSaveRoom(currentRoom, meta)
+  })
+
   socket.on('set_room_avatar', (p = {}) => {
     if (!currentRoom || !me) return
     if (isDm(currentRoom)) return
     const meta = roomMeta.get(currentRoom)
-    const isAdmin = meta && meta.adminId === me.id
+    const isAdmin = (meta && meta.adminId === me.id) || isOwner(me.id)
     if (!isAdmin) return // только админ
     const avatar = p.avatar && typeof p.avatar === 'string' && p.avatar.startsWith('data:image/') && p.avatar.length < 500000 ? p.avatar : null
     io.to(currentRoom).emit('room_avatar', { room: currentRoom, avatar })
@@ -1098,5 +1119,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v71: уникальный ник без пароля (бронь по токену)) на порту ' + PORT)
+  console.log('SVchat server (v74: права владельца (OWNER_KEY) + пароль группы + поиск по нику) на порту ' + PORT)
 })
