@@ -7,6 +7,7 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
+const zlib = require('zlib')
 const { Server } = require('socket.io')
 const webpush = require('web-push')
 
@@ -395,6 +396,8 @@ function onlineTotal() {
 // ── Статика: приложение, service worker, манифест, иконки ───────────────────
 let appHtml = null
 try { appHtml = fs.readFileSync(path.join(__dirname, 'index.html')) } catch {}
+let appHtmlGz = null
+try { if (appHtml) appHtmlGz = zlib.gzipSync(appHtml) } catch {}
 
 const SW_JS = `
 self.addEventListener('install', e => self.skipWaiting())
@@ -411,7 +414,7 @@ self.addEventListener('push', e => {
     renotify: true,
     data: { url: d.url || '/', room: d.room || '' }
   }
-  const bump = new Promise(res => {
+  const doBump = () => new Promise(res => {
     try {
       const r = indexedDB.open('svbadge', 1)
       r.onupgradeneeded = () => r.result.createObjectStore('s')
@@ -430,7 +433,16 @@ self.addEventListener('push', e => {
       r.onerror = () => res()
     } catch { res() }
   })
-  e.waitUntil(Promise.all([self.registration.showNotification(title, opts), bump]))
+  e.waitUntil((async () => {
+    let fg = false
+    try {
+      const cl = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+      fg = cl.some(c => c.focused || c.visibilityState === 'visible')
+    } catch (e) {}
+    if (fg) return // приложение открыто и активно — не беспокоим
+    await doBump()
+    await self.registration.showNotification(title, opts)
+  })())
 })
 self.addEventListener('notificationclick', e => {
   e.notification.close()
@@ -589,8 +601,14 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
   } else if (appHtml) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN' })
-    res.end(appHtml)
+    const ae = String(req.headers['accept-encoding'] || '')
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN' }
+    if (appHtmlGz && /\bgzip\b/.test(ae)) {
+      h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding'
+      res.writeHead(200, h); res.end(appHtmlGz)
+    } else {
+      res.writeHead(200, h); res.end(appHtml)
+    }
   } else {
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
@@ -1070,5 +1088,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v62: непрочитанные в списке чатов) на порту ' + PORT)
+  console.log('SVchat server (v67: gzip + даты/копирование) на порту ' + PORT)
 })
