@@ -12,7 +12,7 @@ const { Server } = require('socket.io')
 const webpush = require('web-push')
 
 const PORT = process.env.PORT || 8080
-const HISTORY_LIMIT = 200
+const HISTORY_LIMIT = 500
 
 // ── Web Push (VAPID) ─────────────────────────────────────────────────────────
 const VAPID_PUBLIC = 'BIcya5h2_ej5u0BMkGyvjSXPLk9pHiy5LXUS0hjzXtipKS47A8xJcCpNrRHZXErGxZbzFXI8re34DPu215B_EjQ'
@@ -127,6 +127,9 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_accounts (nick_key TEXT PRIMARY KEY, nick TEXT NOT NULL, user_id TEXT NOT NULL, pass_hash TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`)
     const accRows = await pool.query(`SELECT nick_key, nick, user_id, pass_hash FROM svchat_accounts`)
     for (const r of accRows.rows) { accounts.set(r.nick_key, { nick: r.nick, userId: r.user_id, passHash: r.pass_hash }); accountByUid.set(r.user_id, r.nick_key) }
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_keys (user_id TEXT PRIMARY KEY, pub TEXT NOT NULL)`)
+    const keyRows = await pool.query(`SELECT user_id, pub FROM svchat_keys`)
+    for (const r of keyRows.rows) pubKeys.set(r.user_id, r.pub)
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -178,6 +181,12 @@ async function dbSaveAuth(userId, tokenHash) {
   try {
     await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbSaveKey(userId, pub) {
+  if (!pool) return
+  try {
+    await pool.query(`INSERT INTO svchat_keys (user_id, pub) VALUES ($1,$2) ON CONFLICT (user_id) DO UPDATE SET pub = EXCLUDED.pub`, [userId, pub])
+  } catch (e) { console.error('[db] key:', e.message) }
 }
 async function dbSaveAccount(key, nick, userId, passHash) {
   if (!pool) return
@@ -332,7 +341,7 @@ function broadcastMembers(room) {
   io.to(room).emit('members', { members: memberList(room) })
 }
 
-const HISTORY_INIT = 30 // сколько сообщений отдаём при входе
+const HISTORY_INIT = 50 // сколько сообщений отдаём при входе
 function liteEntry(e) {
   if (!e || !e.dataUrl) return e
   const c = Object.assign({}, e)
@@ -562,7 +571,7 @@ const server = http.createServer(async (req, res) => {
     const b = await readBody(req)
     const id = String((b && b.id) || '').slice(0, 80)
     const pub = String((b && b.pub) || '').slice(0, 1000)
-    if (id && pub) pubKeys.set(id, pub)
+    if (id && pub) { pubKeys.set(id, pub); dbSaveKey(id, pub) }
     res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: !!(id && pub) }))
   } else if (url === '/pubkey') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
@@ -723,7 +732,7 @@ io.on('connection', (socket) => {
     currentRoom = room
     me = user
     if (OWNER_KEY && p.ownerKey && String(p.ownerKey) === OWNER_KEY) owners.add(me.id)
-    if (p.pubKey) pubKeys.set(me.id, String(p.pubKey).slice(0, 1000))
+    if (p.pubKey) { const pk = String(p.pubKey).slice(0, 1000); pubKeys.set(me.id, pk); dbSaveKey(me.id, pk) }
     socket.join(room)
     if (!roomUsers.has(room)) roomUsers.set(room, new Map())
     roomUsers.get(room).set(socket.id, me)
@@ -764,7 +773,7 @@ io.on('connection', (socket) => {
     if (msg.dataUrl != null) {
       const du = String(msg.dataUrl)
       const cap = msg.msgType === 'video' ? 32e6 : msg.msgType === 'photo' ? 8e6 : msg.msgType === 'voice' ? 6e6 : 0
-      if (!du.startsWith('data:') || du.length > cap) {
+      if ((!msg.enc && !du.startsWith('data:')) || du.length > cap) {
         if (typeof ack === 'function') ack({ ok: false, error: 'bad_media' })
         return
       }
@@ -785,6 +794,8 @@ io.on('connection', (socket) => {
       enc: msg.enc ? 1 : undefined,
       iv: msg.iv ? String(msg.iv).slice(0, 64) : undefined,
       ct: msg.ct ? String(msg.ct).slice(0, 20000) : undefined,
+      miv: msg.miv ? String(msg.miv).slice(0, 64) : undefined,
+      mmime: msg.mmime ? String(msg.mmime).slice(0, 60) : undefined,
       dataUrl: msg.dataUrl,
       dur: msg.dur,
       len: msg.len,
@@ -796,7 +807,7 @@ io.on('connection', (socket) => {
     // Защита памяти: тяжёлые медиа в истории комнаты суммарно не больше ~60 МБ
     let mediaBytes = 0
     for (const e of h) mediaBytes += (e.dataUrl ? e.dataUrl.length : 0)
-    while (mediaBytes > 25e6 && h.length > 1) {
+    while (mediaBytes > 40e6 && h.length > 1) {
       const dropped = h.shift()
       mediaBytes -= (dropped.dataUrl ? dropped.dataUrl.length : 0)
     }
@@ -1139,5 +1150,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v76: счётчик абонентов (/stats) + E2E личных чатов + права владельца) на порту ' + PORT)
+  console.log('SVchat server (v77: ключи в БД + история (лимиты) + E2E медиа в личках + счётчик абонентов) на порту ' + PORT)
 })
