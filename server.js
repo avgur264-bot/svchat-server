@@ -642,7 +642,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) add(a.nick)
     for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 87 }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 88 }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -858,6 +858,7 @@ io.on('connection', (socket) => {
     const entry = {
       id: Date.now() + '-' + Math.random().toString(36).slice(2, 6),
       from: me.id,
+      cid: msg.cid ? String(msg.cid).slice(0, 40) : undefined,
       fromName: me.name,
       msgType: msg.msgType || 'text',
       text: msg.text,
@@ -1253,5 +1254,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v87: реципрокные статусы прочтения (скрытие + владелец видит всё) set_readhide) на порту ' + PORT)
+  console.log('SVchat server (v88: cid в сообщениях для оптимистичной отправки (мгновенный показ)) на порту ' + PORT)
 })
