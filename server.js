@@ -51,6 +51,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
+const CLIENT_BUILD = 96 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const seenAt = new Map() // userId -> ISO: время последнего выхода
@@ -667,7 +668,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) add(a.nick)
     for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 89 }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 91, client: CLIENT_BUILD }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -767,6 +768,8 @@ io.on('connection', (socket) => {
     if (!uid || !ownsUid(uid, token)) return
     goOnline(uid)
   })
+
+  socket.on('rtt', (ts, ack) => { if (typeof ack === 'function') ack(1) })
 
   socket.on('join', async (p = {}) => {
     if (!allow('join', 20, 30000)) { socket.emit('join_error', { reason: 'rate_limited' }); return }
@@ -1279,5 +1282,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v89: установка пароля по HTTP /set_password (не зависит от сокета)) на порту ' + PORT)
+  console.log('SVchat server (v91: отдаёт номер клиентской сборки (CLIENT_BUILD) для авто-обновления) на порту ' + PORT)
 })
