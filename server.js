@@ -580,8 +580,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify(pub ? { ok: true, pub } : { ok: false }))
   } else if (url === '/stats') {
+    const uniqNames = new Set()
+    for (const a of accounts.values()) uniqNames.add(String(a.nick || '').trim().toLowerCase())
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: accounts.size, online: (io && io.engine ? io.engine.clientsCount : 0) }))
+    res.end(JSON.stringify({ ok: true, users: uniqNames.size, online: (io && io.engine ? io.engine.clientsCount : 0) }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1150,5 +1152,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v77: ключи в БД + история (лимиты) + E2E медиа в личках + счётчик абонентов) на порту ' + PORT)
+  console.log('SVchat server (v78: счётчик уникальных имён + ключи в БД + история + E2E медиа) на порту ' + PORT)
 })
