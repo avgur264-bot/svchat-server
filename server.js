@@ -51,6 +51,8 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
+// Проверка владения userId по TOFU-токену: если id уже привязан к токену — менять привязку/аккаунт может только владелец токена
+function ownsUid(userId, token){ const claimed = userAuth.get(userId); if (!claimed) return true; return !!token && hashTok(token) === claimed }
 const accounts = new Map()      // nick_key -> {nick, userId, passHash}: уникальные ники
 const accountByUid = new Map()  // userId -> nick_key
 function nickKey(s){ return String(s || '').trim().toLowerCase() }
@@ -727,7 +729,8 @@ io.on('connection', (socket) => {
       return
     }
     // Ограничение длины текста
-    if (typeof msg.text === 'string' && msg.text.length > 4000) msg.text = msg.text.slice(0, 4000)
+    msg.text = (msg.text == null) ? '' : String(msg.text)
+    if (msg.text.length > 4000) msg.text = msg.text.slice(0, 4000)
     // Валидация типа и медиа: только data:-URL, лимиты по типу
     const MT = ['text', 'photo', 'video', 'voice']
     if (!MT.includes(msg.msgType)) msg.msgType = 'text'
@@ -963,6 +966,7 @@ io.on('connection', (socket) => {
       return
     }
     const userId = (String(p.userId || '').slice(0, 80)) || ('u-' + crypto.randomBytes(8).toString('hex'))
+    if (!ownsUid(userId, token)) { ack({ ok: false, reason: 'id_taken' }); return }
     const passHash = hashPassword(password)
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
@@ -980,6 +984,7 @@ io.on('connection', (socket) => {
     const userId = String(p.userId || '').slice(0, 80)
     const nick = String(p.nick || '').trim().slice(0, 40)
     if (!userId || nick.length < 2 || password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
+    if (!ownsUid(userId, token)) { ack({ ok: false, reason: 'id_taken' }); return }
     const myKey = accountByUid.get(userId)
     if (myKey && accounts.get(myKey)) {
       const acc = accounts.get(myKey); const passHash = hashPassword(password)
@@ -1088,5 +1093,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v67: gzip + даты/копирование) на порту ' + PORT)
+  console.log('SVchat server (v68: фикс безопасности аккаунтов (TOFU-владение userId)) на порту ' + PORT)
 })
