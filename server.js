@@ -51,9 +51,10 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 96 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 97 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
+const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
 const seenAt = new Map() // userId -> ISO: время последнего выхода
 const readHidden = new Set() // userId: скрывает статус прочтения (реципрокно, кроме владельца)
 const owners = new Set() // userId владельцев (права админа во всех группах)
@@ -144,6 +145,9 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_readhide (user_id TEXT PRIMARY KEY)`)
     const rhRows = await pool.query(`SELECT user_id FROM svchat_readhide`)
     for (const r of rhRows.rows) readHidden.add(r.user_id)
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_dirremoved (user_id TEXT PRIMARY KEY)`)
+    const drRows = await pool.query(`SELECT user_id FROM svchat_dirremoved`)
+    for (const r of drRows.rows) dirRemoved.add(r.user_id)
     console.log('[db] готово: комнат', rooms.rowCount, '· push-подписок', subs.rowCount, '· участников', mems.rowCount)
     return true
   } catch (e) {
@@ -195,6 +199,10 @@ async function dbSaveAuth(userId, tokenHash) {
   try {
     await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbSaveDirRemoved(userId) {
+  if (!pool) return
+  try { await pool.query(`INSERT INTO svchat_dirremoved (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, [userId]) } catch (e) { console.error('[db] dirremoved:', e.message) }
 }
 async function dbSaveReadHide(userId, hidden) {
   if (!pool) return
@@ -599,6 +607,14 @@ const server = http.createServer(async (req, res) => {
       (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ contacts: list }))
+  } else if (url === '/remove_contact' && req.method === 'POST') {
+    const b = await readBody(req)
+    const owner = b && b.owner ? String(b.owner) : ''
+    const uid = String((b && b.userId) || '').slice(0, 80)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    if (!OWNER_KEY || owner !== OWNER_KEY) { res.end(JSON.stringify({ ok: false, reason: 'not_owner' })); return }
+    if (uid) { dirRemoved.add(uid); dbSaveDirRemoved(uid) }
+    res.end(JSON.stringify({ ok: !!uid }))
   } else if (url === '/set_password' && req.method === 'POST') {
     await dbReady
     const b = await readBody(req)
@@ -647,6 +663,7 @@ const server = http.createServer(async (req, res) => {
       const id = String(uid || '')
       const nme = String(nm || '').trim()
       if (!id || !nme || id === meId) return
+      if (dirRemoved.has(id)) return
       const hid = hiddenUsers.has(id)
       if (hid && !showHidden) return
       const key = norm(nme) || nme.toLowerCase()
@@ -665,10 +682,10 @@ const server = http.createServer(async (req, res) => {
     const norm = s => String(s || '').toLowerCase().normalize('NFKC').replace(/[^\p{L}\p{N}]+/gu, '')
     const keys = new Set()
     const add = nm => { const k = norm(nm); if (k) keys.add(k) }
-    for (const a of accounts.values()) add(a.nick)
-    for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
+    for (const a of accounts.values()) { if (!dirRemoved.has(String(a.userId))) add(a.nick) }
+    for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) { if (!dirRemoved.has(String(uid))) add(info && info.name) }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 91, client: CLIENT_BUILD }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 92, client: CLIENT_BUILD }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1282,5 +1299,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v91: отдаёт номер клиентской сборки (CLIENT_BUILD) для авто-обновления) на порту ' + PORT)
+  console.log('SVchat server (v92: владелец удаляет дубликат из справочника /remove_contact (dirRemoved)) на порту ' + PORT)
 })
