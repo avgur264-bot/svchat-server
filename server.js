@@ -52,6 +52,7 @@ const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
 const owners = new Set() // userId владельцев (права админа во всех группах)
+const pubKeys = new Map() // userId -> публичный ключ ECDH (для E2E личных чатов)
 function isOwner(uid){ return !!uid && owners.has(uid) }
 function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
 // Проверка владения userId по TOFU-токену: если id уже привязан к токену — менять привязку/аккаунт может только владелец токена
@@ -557,6 +558,18 @@ const server = http.createServer(async (req, res) => {
       (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ contacts: list }))
+  } else if (url === '/pubkey' && req.method === 'POST') {
+    const b = await readBody(req)
+    const id = String((b && b.id) || '').slice(0, 80)
+    const pub = String((b && b.pub) || '').slice(0, 1000)
+    if (id && pub) pubKeys.set(id, pub)
+    res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: !!(id && pub) }))
+  } else if (url === '/pubkey') {
+    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
+    const id = String(q.get('id') || '').slice(0, 80)
+    const pub = id ? pubKeys.get(id) : null
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    res.end(JSON.stringify(pub ? { ok: true, pub } : { ok: false }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -707,6 +720,7 @@ io.on('connection', (socket) => {
     currentRoom = room
     me = user
     if (OWNER_KEY && p.ownerKey && String(p.ownerKey) === OWNER_KEY) owners.add(me.id)
+    if (p.pubKey) pubKeys.set(me.id, String(p.pubKey).slice(0, 1000))
     socket.join(room)
     if (!roomUsers.has(room)) roomUsers.set(room, new Map())
     roomUsers.get(room).set(socket.id, me)
@@ -765,6 +779,9 @@ io.on('connection', (socket) => {
         text: String(msg.replyTo.text || '').slice(0, 90)
       } : undefined,
       encrypted: msg.encrypted,
+      enc: msg.enc ? 1 : undefined,
+      iv: msg.iv ? String(msg.iv).slice(0, 64) : undefined,
+      ct: msg.ct ? String(msg.ct).slice(0, 20000) : undefined,
       dataUrl: msg.dataUrl,
       dur: msg.dur,
       len: msg.len,
@@ -1119,5 +1136,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v74: права владельца (OWNER_KEY) + пароль группы + поиск по нику) на порту ' + PORT)
+  console.log('SVchat server (v75: E2E личных чатов (обмен ключами) + права владельца + пароль группы) на порту ' + PORT)
 })
