@@ -956,18 +956,23 @@ io.on('connection', (socket) => {
     const nick = String(p.nick || '').trim().slice(0, 40)
     const password = String(p.password || '')
     const token = p.auth ? String(p.auth).slice(0, 128) : ''
-    if (nick.length < 2 || password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
+    if (nick.length < 2) { ack({ ok: false, reason: 'bad_input' }); return }
+    if (password && password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
     const key = nickKey(nick)
     const existing = accounts.get(key)
     if (existing) {
-      if (!verifyPassword(password, existing.passHash)) { ack({ ok: false, reason: 'wrong_password' }); return }
+      if (existing.passHash) {
+        if (!verifyPassword(password, existing.passHash)) { ack({ ok: false, reason: 'wrong_password' }); return }
+      } else if (!ownsUid(existing.userId, token)) {
+        ack({ ok: false, reason: 'nick_taken' }); return
+      }
       if (token) { const th = hashTok(token); userAuth.set(existing.userId, th); dbSaveAuth(existing.userId, th) }
       ack({ ok: true, userId: existing.userId, nick: existing.nick })
       return
     }
     const userId = (String(p.userId || '').slice(0, 80)) || ('u-' + crypto.randomBytes(8).toString('hex'))
     if (!ownsUid(userId, token)) { ack({ ok: false, reason: 'id_taken' }); return }
-    const passHash = hashPassword(password)
+    const passHash = password ? hashPassword(password) : ''
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
     if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
@@ -1093,5 +1098,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v68: фикс безопасности аккаунтов (TOFU-владение userId)) на порту ' + PORT)
+  console.log('SVchat server (v71: уникальный ник без пароля (бронь по токену)) на порту ' + PORT)
 })
