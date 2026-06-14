@@ -598,6 +598,31 @@ const server = http.createServer(async (req, res) => {
       (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ contacts: list }))
+  } else if (url === '/set_password' && req.method === 'POST') {
+    await dbReady
+    const b = await readBody(req)
+    const password = String((b && b.password) || '')
+    const token = b && b.auth ? String(b.auth).slice(0, 128) : ''
+    const userId = String((b && b.userId) || '').slice(0, 80)
+    const nick = String((b && b.nick) || '').trim().slice(0, 40)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    if (!userId || nick.length < 2 || password.length < 4) { res.end(JSON.stringify({ ok: false, reason: 'bad_input' })); return }
+    if (!ownsUid(userId, token)) { res.end(JSON.stringify({ ok: false, reason: 'id_taken' })); return }
+    const myKey = accountByUid.get(userId)
+    if (myKey && accounts.get(myKey)) {
+      const acc = accounts.get(myKey); const passHash = hashPassword(password)
+      acc.passHash = passHash; dbSaveAccount(myKey, acc.nick, userId, passHash)
+      if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+      res.end(JSON.stringify({ ok: true, userId, nick: acc.nick, changed: true })); return
+    }
+    const key = nickKey(nick)
+    const existing = accounts.get(key)
+    if (existing && existing.userId !== userId) { res.end(JSON.stringify({ ok: false, reason: 'nick_taken' })); return }
+    const passHash = hashPassword(password)
+    accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
+    dbSaveAccount(key, nick, userId, passHash)
+    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+    res.end(JSON.stringify({ ok: true, userId, nick }))
   } else if (url === '/pubkey' && req.method === 'POST') {
     const b = await readBody(req)
     const id = String((b && b.id) || '').slice(0, 80)
@@ -642,7 +667,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) add(a.nick)
     for (const m of roomMembers.values()) for (const [, info] of m.entries()) add(info && info.name)
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 88 }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 89 }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1254,5 +1279,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v88: cid в сообщениях для оптимистичной отправки (мгновенный показ)) на порту ' + PORT)
+  console.log('SVchat server (v89: установка пароля по HTTP /set_password (не зависит от сокета)) на порту ' + PORT)
 })
