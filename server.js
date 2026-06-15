@@ -566,47 +566,6 @@ const server = http.createServer(async (req, res) => {
   } else if (url === '/manifest.json' || url === '/manifest.webmanifest') {
     res.writeHead(200, { 'Content-Type': 'application/manifest+json', 'Cache-Control': 'public, max-age=3600' })
     res.end(MANIFEST)
-  } else if (url === '/contacts') {
-    // Книжка контактов: уникальные люди из перечисленных комнат
-    await dbReady
-    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
-    const rooms = String(q.get('rooms') || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50)
-    const meId = String(q.get('me') || '')
-    const seen = new Map()
-    for (const room of rooms) {
-      const m = roomMembers.get(room)
-      if (!m) continue
-      const online = onlineIdsIn(room)
-      for (const [uid, info] of m.entries()) {
-        if (uid === meId) continue
-        const prev = seen.get(uid)
-        const cand = {
-          id: uid,
-          name: (info && info.name) || 'Без имени',
-          lastSeen: (info && info.lastSeen) || null,
-          online: online.has(uid),
-          photo: (info && info.photo) || null
-        }
-        if (!prev || cand.online || (cand.lastSeen && (!prev.lastSeen || cand.lastSeen > prev.lastSeen))) {
-          seen.set(uid, prev ? Object.assign(prev, { online: prev.online || cand.online, lastSeen: cand.lastSeen || prev.lastSeen, name: cand.name, photo: cand.photo || prev.photo }) : cand)
-        }
-      }
-    }
-    const byName = new Map()
-    for (const cand of seen.values()) {
-      const key = (String(cand.name || '').trim().toLowerCase()) || ('id:' + cand.id)
-      const prev = byName.get(key)
-      if (!prev) { byName.set(key, cand); continue }
-      if (!prev.photo && cand.photo) prev.photo = cand.photo
-      const better = (cand.online && !prev.online) ||
-        (cand.online === prev.online && String(cand.lastSeen || '') > String(prev.lastSeen || ''))
-      if (better) { if (!cand.photo && prev.photo) cand.photo = prev.photo; cand.online = cand.online || prev.online; byName.set(key, cand) }
-      else if (cand.online) prev.online = true
-    }
-    const list = Array.from(byName.values()).sort((a, b) =>
-      (b.online - a.online) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ contacts: list }))
   } else if (url === '/remove_contact' && req.method === 'POST') {
     const b = await readBody(req)
     const owner = b && b.owner ? String(b.owner) : ''
@@ -685,7 +644,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) { if (!dirRemoved.has(String(a.userId))) add(a.nick) }
     for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) { if (!dirRemoved.has(String(uid))) add(info && info.name) }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 95, client: CLIENT_BUILD }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: CLIENT_BUILD, client: CLIENT_BUILD }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1166,33 +1125,6 @@ io.on('connection', (socket) => {
     dbSaveHidden(userId, hidden)
   })
 
-  socket.on('account_set_password', async (p = {}, ack) => {
-    if (typeof ack !== 'function') return
-    if (!allow('join', 20, 30000)) { ack({ ok: false, reason: 'rate_limited' }); return }
-    await dbReady
-    const password = String(p.password || '')
-    const token = p.auth ? String(p.auth).slice(0, 128) : ''
-    const userId = String(p.userId || '').slice(0, 80)
-    const nick = String(p.nick || '').trim().slice(0, 40)
-    if (!userId || nick.length < 2 || password.length < 4) { ack({ ok: false, reason: 'bad_input' }); return }
-    if (!ownsUid(userId, token)) { ack({ ok: false, reason: 'id_taken' }); return }
-    const myKey = accountByUid.get(userId)
-    if (myKey && accounts.get(myKey)) {
-      const acc = accounts.get(myKey); const passHash = hashPassword(password)
-      acc.passHash = passHash; dbSaveAccount(myKey, acc.nick, userId, passHash)
-      if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
-      ack({ ok: true, userId, nick: acc.nick, changed: true }); return
-    }
-    const key = nickKey(nick)
-    const existing = accounts.get(key)
-    if (existing && existing.userId !== userId) { ack({ ok: false, reason: 'nick_taken' }); return }
-    const passHash = hashPassword(password)
-    accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
-    dbSaveAccount(key, nick, userId, passHash)
-    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
-    ack({ ok: true, userId, nick })
-  })
-
   socket.on('contact_remove', (p = {}) => {
     if (!me) return
     if (!allow('dm', 10, 30000)) return
@@ -1299,5 +1231,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v95: владелец удаляет дубликат из справочника /remove_contact (dirRemoved)) на порту ' + PORT)
+  console.log('SVchat server (v101: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
