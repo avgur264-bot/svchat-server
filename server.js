@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 123 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 124 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -491,6 +491,11 @@ let appHtml = null
 try { appHtml = fs.readFileSync(path.join(__dirname, 'index.html')) } catch {}
 let appHtmlGz = null
 try { if (appHtml) appHtmlGz = zlib.gzipSync(appHtml) } catch {}
+// ETag по содержимому: повторные загрузки получают 304 без перекачки ~100КБ
+const appHtmlEtag = appHtml ? '"' + crypto.createHash('sha256').update(appHtml).digest('hex').slice(0, 16) + '"' : null
+// Brotli (меньше gzip на ~18%) считаем асинхронно, чтобы не задерживать старт сервера
+let appHtmlBr = null
+if (appHtml) zlib.brotliCompress(appHtml, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } }, (e, out) => { if (!e) appHtmlBr = out })
 
 const SW_JS = `
 self.addEventListener('install', e => self.skipWaiting())
@@ -752,9 +757,15 @@ const server = http.createServer(async (req, res) => {
     res.end('{"ok":true}')
   } else if (appHtml) {
     const ae = String(req.headers['accept-encoding'] || '')
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-7SEQdD42LlXv3q/5zBW+BRTQLWEaMfn9epiMMqz2Ff0=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
-    if (appHtmlGz && /\bgzip\b/.test(ae)) {
-      h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding'
+    if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
+      res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
+    }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-jRzWdH5qvR3kjuiH/giXHlCC3Hp50oIBgd551ztcoo8=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    if (appHtmlBr && /\bbr\b/.test(ae)) {
+      h['Content-Encoding'] = 'br'
+      res.writeHead(200, h); res.end(appHtmlBr)
+    } else if (appHtmlGz && /\bgzip\b/.test(ae)) {
+      h['Content-Encoding'] = 'gzip'
       res.writeHead(200, h); res.end(appHtmlGz)
     } else {
       res.writeHead(200, h); res.end(appHtml)
@@ -1290,5 +1301,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v123: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v124: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
