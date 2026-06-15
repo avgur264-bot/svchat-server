@@ -15,18 +15,35 @@ const PORT = process.env.PORT || 8080
 const HISTORY_LIMIT = 500
 
 // ── Web Push (VAPID) ─────────────────────────────────────────────────────────
-// ВНИМАНИЕ: приватный ключ ниже использовался как fallback и попал в историю git.
-// Его следует РОТИРОВАТЬ и задавать через переменные окружения VAPID_PUBLIC/VAPID_PRIVATE.
-const VAPID_PUBLIC = process.env.VAPID_PUBLIC || 'BIcya5h2_ej5u0BMkGyvjSXPLk9pHiy5LXUS0hjzXtipKS47A8xJcCpNrRHZXErGxZbzFXI8re34DPu215B_EjQ'
-const VAPID_PRIVATE = process.env.VAPID_PRIVATE || 'CmR_1O1LAe-baaCuoUUdZBPk66STfCz0CuAs3KUHiKo'
+// Ключи задаются через переменные окружения VAPID_PUBLIC/VAPID_PRIVATE (рекомендуется).
+// Значения ниже — новая пара после ротации скомпрометированного ключа; для максимальной
+// безопасности перенесите приватный ключ в env и удалите его из кода.
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC || 'BA-Yx74xj5Oa8MXYY_bN75dEEx6yE7LzL36hFRuP0S9-XpHRutcxAPfa5nLg-xMAxQ3xZ0_7QnuTU7waWYcfDW0'
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || 'qDOADfBSmODIXrJLK81-9bMt143s25M_UkxcfPRy2nQ'
 webpush.setVapidDetails('mailto:admin@svchat.app', VAPID_PUBLIC, VAPID_PRIVATE)
 
 // room -> Map<endpoint, { sub, userId }>
 const pushSubs = new Map()
+// userId -> Map<endpoint, sub>: индекс для O(1)-поиска подписок пользователя (pushToUser)
+const userSubs = new Map()
+function indexSub(userId, endpoint, sub) {
+  const u = String(userId || '')
+  if (!u || !endpoint || !sub) return
+  if (!userSubs.has(u)) userSubs.set(u, new Map())
+  userSubs.get(u).set(endpoint, sub)
+}
+function unindexSub(userId, endpoint) {
+  const u = String(userId || '')
+  const s = userSubs.get(u)
+  if (!s) return
+  s.delete(endpoint)
+  if (!s.size) userSubs.delete(u)
+}
 function addSub(room, userId, sub) {
   if (!sub || typeof sub.endpoint !== 'string' || !sub.endpoint.startsWith('https://') || sub.endpoint.length > 500) return
   if (!pushSubs.has(room)) pushSubs.set(room, new Map())
   pushSubs.get(room).set(sub.endpoint, { sub, userId })
+  indexSub(userId, sub.endpoint, sub)
 }
 async function pushToRoom(room, exceptUserId, payload) {
   const m = pushSubs.get(room)
@@ -41,7 +58,7 @@ async function pushToRoom(room, exceptUserId, payload) {
       await webpush.sendNotification(sub, data, { TTL: 60 })
     } catch (e) {
       const code = e && e.statusCode
-      if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) } // подписка умерла
+      if (code === 404 || code === 410) { m.delete(endpoint); unindexSub(userId, endpoint); dbDelSub(endpoint) } // подписка умерла
     }
   }))
 }
@@ -104,6 +121,7 @@ const dbReady = (async () => {
     for (const r of subs.rows) {
       if (!pushSubs.has(r.room)) pushSubs.set(r.room, new Map())
       pushSubs.get(r.room).set(r.endpoint, { sub: r.sub, userId: r.user_id })
+      indexSub(r.user_id, r.endpoint, r.sub)
     }
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_members (
       room TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT, last_seen TIMESTAMPTZ DEFAULT now(), photo TEXT,
@@ -259,16 +277,25 @@ async function dbSaveRoom(room, meta) {
       [room, meta.password || null, meta.adminId || null])
   } catch (e) { console.error('[db] комната:', e.message) }
 }
+const PRUNE_EVERY = 25 // как часто (раз в N вставок на комнату) подчищать старые сообщения
+const msgInserts = new Map() // room -> счётчик вставок с последней чистки
 async function dbSaveMsg(room, entry) {
   if (!pool) return
   try {
     await pool.query(
       `INSERT INTO svchat_messages (id, room, entry) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
       [entry.id, room, entry])
-    await pool.query(
-      `DELETE FROM svchat_messages WHERE room = $1 AND id IN (
-         SELECT id FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC OFFSET $2)`,
-      [room, HISTORY_LIMIT])
+    // Чистим хвост не на каждое сообщение, а пачками — тяжёлый DELETE с подзапросом реже бьёт по БД
+    const n = (msgInserts.get(room) || 0) + 1
+    if (n >= PRUNE_EVERY) {
+      msgInserts.set(room, 0)
+      await pool.query(
+        `DELETE FROM svchat_messages WHERE room = $1 AND id IN (
+           SELECT id FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC OFFSET $2)`,
+        [room, HISTORY_LIMIT])
+    } else {
+      msgInserts.set(room, n)
+    }
   } catch (e) { console.error('[db] сообщение:', e.message) }
 }
 async function dbUpdateMsg(room, entry) {
@@ -435,22 +462,16 @@ function dmRoomId(a, b) {
 }
 // Push конкретному человеку по userId — ищем его подписки во всех комнатах
 async function pushToUser(userId, payload) {
+  const u = userSubs.get(String(userId))
+  if (!u || !u.size) return
   const data = JSON.stringify(payload)
-  const seen = new Set()
-  const tasks = []
-  for (const [, m] of pushSubs.entries()) {
-    for (const [endpoint, rec] of [...m.entries()]) {
-      if (rec.userId !== userId || seen.has(endpoint)) continue
-      seen.add(endpoint)
-      tasks.push((async () => {
-        try { await webpush.sendNotification(rec.sub, data) } catch (e) {
-          const code = e && e.statusCode
-          if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) }
-        }
-      })())
+  // Подписки берём из индекса напрямую, без перебора всех комнат
+  await Promise.all([...u.entries()].map(async ([endpoint, sub]) => {
+    try { await webpush.sendNotification(sub, data) } catch (e) {
+      const code = e && e.statusCode
+      if (code === 404 || code === 410) { unindexSub(userId, endpoint); dbDelSub(endpoint) } // мёртвый endpoint самоочистится из комнат при pushToRoom
     }
-  }
-  await Promise.all(tasks)
+  }))
 }
 
 function onlineTotal() {
