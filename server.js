@@ -15,32 +15,51 @@ const PORT = process.env.PORT || 8080
 const HISTORY_LIMIT = 500
 
 // ── Web Push (VAPID) ─────────────────────────────────────────────────────────
-const VAPID_PUBLIC = 'BIcya5h2_ej5u0BMkGyvjSXPLk9pHiy5LXUS0hjzXtipKS47A8xJcCpNrRHZXErGxZbzFXI8re34DPu215B_EjQ'
-const VAPID_PRIVATE = 'CmR_1O1LAe-baaCuoUUdZBPk66STfCz0CuAs3KUHiKo'
+// VAPID_PUBLIC — не секрет, можно хранить в коде.
+// VAPID_PRIVATE — секрет: задать в Render → Environment → VAPID_PRIVATE.
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC || 'BA-Yx74xj5Oa8MXYY_bN75dEEx6yE7LzL36hFRuP0S9-XpHRutcxAPfa5nLg-xMAxQ3xZ0_7QnuTU7waWYcfDW0'
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE || ''
 webpush.setVapidDetails('mailto:admin@svchat.app', VAPID_PUBLIC, VAPID_PRIVATE)
 
 // room -> Map<endpoint, { sub, userId }>
 const pushSubs = new Map()
+// userId -> Map<endpoint, sub>: индекс для O(1)-поиска подписок пользователя (pushToUser)
+const userSubs = new Map()
+function indexSub(userId, endpoint, sub) {
+  const u = String(userId || '')
+  if (!u || !endpoint || !sub) return
+  if (!userSubs.has(u)) userSubs.set(u, new Map())
+  userSubs.get(u).set(endpoint, sub)
+}
+function unindexSub(userId, endpoint) {
+  const u = String(userId || '')
+  const s = userSubs.get(u)
+  if (!s) return
+  s.delete(endpoint)
+  if (!s.size) userSubs.delete(u)
+}
 function addSub(room, userId, sub) {
   if (!sub || typeof sub.endpoint !== 'string' || !sub.endpoint.startsWith('https://') || sub.endpoint.length > 500) return
   if (!pushSubs.has(room)) pushSubs.set(room, new Map())
   pushSubs.get(room).set(sub.endpoint, { sub, userId })
+  indexSub(userId, sub.endpoint, sub)
 }
 async function pushToRoom(room, exceptUserId, payload) {
   const m = pushSubs.get(room)
-  const online = onlineIdsIn(room)
   if (!m) return
+  const online = onlineIdsIn(room)
   const data = JSON.stringify(payload)
-  for (const [endpoint, { sub, userId }] of [...m.entries()]) {
-    if (online.has(String(userId))) continue // приложение открыто в этой комнате — push не нужен
-    if (userId === exceptUserId) continue
+  // Рассылаем параллельно: одна «мёртвая» подписка не задерживает остальные
+  await Promise.all([...m.entries()].map(async ([endpoint, { sub, userId }]) => {
+    if (online.has(String(userId))) return // приложение открыто в этой комнате — push не нужен
+    if (userId === exceptUserId) return
     try {
       await webpush.sendNotification(sub, data, { TTL: 60 })
     } catch (e) {
       const code = e && e.statusCode
-      if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) } // подписка умерла
+      if (code === 404 || code === 410) { m.delete(endpoint); unindexSub(userId, endpoint); dbDelSub(endpoint) } // подписка умерла
     }
-  }
+  }))
 }
 
 const history = new Map()
@@ -51,7 +70,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 102 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 103 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -101,6 +120,7 @@ const dbReady = (async () => {
     for (const r of subs.rows) {
       if (!pushSubs.has(r.room)) pushSubs.set(r.room, new Map())
       pushSubs.get(r.room).set(r.endpoint, { sub: r.sub, userId: r.user_id })
+      indexSub(r.user_id, r.endpoint, r.sub)
     }
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_members (
       room TEXT NOT NULL, user_id TEXT NOT NULL, name TEXT, last_seen TIMESTAMPTZ DEFAULT now(), photo TEXT,
@@ -256,16 +276,25 @@ async function dbSaveRoom(room, meta) {
       [room, meta.password || null, meta.adminId || null])
   } catch (e) { console.error('[db] комната:', e.message) }
 }
+const PRUNE_EVERY = 25 // как часто (раз в N вставок на комнату) подчищать старые сообщения
+const msgInserts = new Map() // room -> счётчик вставок с последней чистки
 async function dbSaveMsg(room, entry) {
   if (!pool) return
   try {
     await pool.query(
       `INSERT INTO svchat_messages (id, room, entry) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`,
       [entry.id, room, entry])
-    await pool.query(
-      `DELETE FROM svchat_messages WHERE room = $1 AND id IN (
-         SELECT id FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC OFFSET $2)`,
-      [room, HISTORY_LIMIT])
+    // Чистим хвост не на каждое сообщение, а пачками — тяжёлый DELETE с подзапросом реже бьёт по БД
+    const n = (msgInserts.get(room) || 0) + 1
+    if (n >= PRUNE_EVERY) {
+      msgInserts.set(room, 0)
+      await pool.query(
+        `DELETE FROM svchat_messages WHERE room = $1 AND id IN (
+           SELECT id FROM svchat_messages WHERE room = $1 ORDER BY created_at DESC OFFSET $2)`,
+        [room, HISTORY_LIMIT])
+    } else {
+      msgInserts.set(room, n)
+    }
   } catch (e) { console.error('[db] сообщение:', e.message) }
 }
 async function dbUpdateMsg(room, entry) {
@@ -403,17 +432,19 @@ function userList(room) {
 function isDm(room) { return typeof room === 'string' && room.startsWith('dm:') }
 
 // ── Безопасность паролей: scrypt с солью, формат "scrypt$<соль>$<хеш>" ──
-function hashPassword(plain) {
+// Асинхронный scrypt, чтобы тяжёлый хеш не блокировал event loop (вход/логин).
+const scryptAsync = require('util').promisify(crypto.scrypt)
+async function hashPassword(plain) {
   if (!plain) return null
   const salt = crypto.randomBytes(16).toString('hex')
-  const hash = crypto.scryptSync(String(plain), salt, 32).toString('hex')
+  const hash = (await scryptAsync(String(plain), salt, 32)).toString('hex')
   return 'scrypt$' + salt + '$' + hash
 }
-function verifyPassword(plain, stored) {
+async function verifyPassword(plain, stored) {
   if (!stored) return !plain
   if (typeof stored === 'string' && stored.startsWith('scrypt$')) {
     const [, salt, hash] = stored.split('$')
-    const calc = crypto.scryptSync(String(plain || ''), salt, 32).toString('hex')
+    const calc = (await scryptAsync(String(plain || ''), salt, 32)).toString('hex')
     const a = Buffer.from(hash, 'hex'), b = Buffer.from(calc, 'hex')
     return a.length === b.length && crypto.timingSafeEqual(a, b)
   }
@@ -430,18 +461,16 @@ function dmRoomId(a, b) {
 }
 // Push конкретному человеку по userId — ищем его подписки во всех комнатах
 async function pushToUser(userId, payload) {
+  const u = userSubs.get(String(userId))
+  if (!u || !u.size) return
   const data = JSON.stringify(payload)
-  const seen = new Set()
-  for (const [, m] of pushSubs.entries()) {
-    for (const [endpoint, rec] of [...m.entries()]) {
-      if (rec.userId !== userId || seen.has(endpoint)) continue
-      seen.add(endpoint)
-      try { await webpush.sendNotification(rec.sub, data) } catch (e) {
-        const code = e && e.statusCode
-        if (code === 404 || code === 410) { m.delete(endpoint); dbDelSub(endpoint) }
-      }
+  // Подписки берём из индекса напрямую, без перебора всех комнат
+  await Promise.all([...u.entries()].map(async ([endpoint, sub]) => {
+    try { await webpush.sendNotification(sub, data) } catch (e) {
+      const code = e && e.statusCode
+      if (code === 404 || code === 410) { unindexSub(userId, endpoint); dbDelSub(endpoint) } // мёртвый endpoint самоочистится из комнат при pushToRoom
     }
-  }
+  }))
 }
 
 function onlineTotal() {
@@ -586,7 +615,7 @@ const server = http.createServer(async (req, res) => {
     if (!ownsUid(userId, token)) { res.end(JSON.stringify({ ok: false, reason: 'id_taken' })); return }
     const myKey = accountByUid.get(userId)
     if (myKey && accounts.get(myKey)) {
-      const acc = accounts.get(myKey); const passHash = hashPassword(password)
+      const acc = accounts.get(myKey); const passHash = await hashPassword(password)
       acc.passHash = passHash; dbSaveAccount(myKey, acc.nick, userId, passHash)
       if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
       res.end(JSON.stringify({ ok: true, userId, nick: acc.nick, changed: true })); return
@@ -594,7 +623,7 @@ const server = http.createServer(async (req, res) => {
     const key = nickKey(nick)
     const existing = accounts.get(key)
     if (existing && existing.userId !== userId) { res.end(JSON.stringify({ ok: false, reason: 'nick_taken' })); return }
-    const passHash = hashPassword(password)
+    const passHash = await hashPassword(password)
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
     if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
@@ -671,9 +700,10 @@ const server = http.createServer(async (req, res) => {
     const meId = String((b && b.me) || '').slice(0, 80)
     const rooms = Array.isArray(b && b.rooms) ? b.rooms.slice(0, 100) : []
     const summary = {}
-    for (const it of rooms) {
+    // Считаем комнаты параллельно, а не последовательным циклом запросов
+    await Promise.all(rooms.map(async it => {
       const room = String((it && it.room) || '').slice(0, 64)
-      if (!room) continue
+      if (!room) return
       const since = String((it && it.since) || '')
       let count = 0
       if (pool) {
@@ -686,7 +716,7 @@ const server = http.createServer(async (req, res) => {
         for (const e of h) if (String(e.from) !== meId && (!since || (e.time || '') > since)) count++
       }
       summary[room] = { count }
-    }
+    }))
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify({ summary }))
   } else if (url === '/subscribe' && req.method === 'POST') {
@@ -782,23 +812,23 @@ io.on('connection', (socket) => {
     } else if (!occupied) {
       const prev = roomMeta.get(room)
       if (prev && prev.password) {
-        if (!verifyPassword(password, prev.password)) {
+        if (!(await verifyPassword(password, prev.password))) {
           socket.emit('join_error', { reason: 'wrong_password' })
           return
         }
         meta = prev
         // Миграция: если пароль ещё в открытом виде — пересохраняем хешем
         if (!String(prev.password).startsWith('scrypt$')) {
-          meta.password = hashPassword(password)
+          meta.password = await hashPassword(password)
           dbSaveRoom(room, meta)
         }
       } else {
-        meta = { password: password ? hashPassword(password) : null, adminId: user.id }
+        meta = { password: password ? await hashPassword(password) : null, adminId: user.id }
         dbSaveRoom(room, meta)
       }
       roomMeta.set(room, meta)
     } else {
-      if (meta && meta.password && !verifyPassword(password, meta.password)) {
+      if (meta && meta.password && !(await verifyPassword(password, meta.password))) {
         socket.emit('join_error', { reason: 'wrong_password' })
         return
       }
@@ -973,7 +1003,7 @@ io.on('connection', (socket) => {
     if (!id || !emoji) return
     const h = getHistory(currentRoom)
     const entry = h.find(e => e.id === id)
-    if (!entry) return
+    if (!entry || entry.deleted) return // нельзя реагировать на удалённое сообщение
     if (!entry.reactions) entry.reactions = {}
     if (!entry.reactions[emoji] && Object.keys(entry.reactions).length >= 12) return
     const users = entry.reactions[emoji] || []
@@ -989,6 +1019,7 @@ io.on('connection', (socket) => {
   // Удаление своего сообщения (админ может удалять любые)
   socket.on('delete_msg', (p = {}) => {
     if (!currentRoom || !me) return
+    if (!allow('rw', 30, 10000)) return
     const id = String(p.id || '')
     if (!id) return
     const h = getHistory(currentRoom)
@@ -1089,7 +1120,7 @@ io.on('connection', (socket) => {
     const existing = accounts.get(key)
     if (existing) {
       if (existing.passHash) {
-        if (!verifyPassword(password, existing.passHash)) { ack({ ok: false, reason: 'wrong_password' }); return }
+        if (!(await verifyPassword(password, existing.passHash))) { ack({ ok: false, reason: 'wrong_password' }); return }
       } else if (!ownsUid(existing.userId, token)) {
         ack({ ok: false, reason: 'nick_taken' }); return
       }
@@ -1099,7 +1130,7 @@ io.on('connection', (socket) => {
     }
     const userId = (String(p.userId || '').slice(0, 80)) || ('u-' + crypto.randomBytes(8).toString('hex'))
     if (!ownsUid(userId, token)) { ack({ ok: false, reason: 'id_taken' }); return }
-    const passHash = password ? hashPassword(password) : ''
+    const passHash = password ? await hashPassword(password) : ''
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
     if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
@@ -1184,13 +1215,13 @@ io.on('connection', (socket) => {
     }
   })
 
-  socket.on('set_room_password', (p = {}) => {
+  socket.on('set_room_password', async (p = {}) => {
     if (!currentRoom || !me) return
     if (isDm(currentRoom)) return
     const meta = roomMeta.get(currentRoom)
     if (!meta || (meta.adminId !== me.id && !isOwner(me.id))) return
     const pw = p.password != null ? String(p.password).slice(0, 64) : ''
-    meta.password = pw ? hashPassword(pw) : null
+    meta.password = pw ? await hashPassword(pw) : null
     roomMeta.set(currentRoom, meta)
     dbSaveRoom(currentRoom, meta)
   })
@@ -1231,5 +1262,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v102: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v103: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
