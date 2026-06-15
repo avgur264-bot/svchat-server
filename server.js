@@ -51,7 +51,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 99 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 101 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -685,7 +685,7 @@ const server = http.createServer(async (req, res) => {
     for (const a of accounts.values()) { if (!dirRemoved.has(String(a.userId))) add(a.nick) }
     for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) { if (!dirRemoved.has(String(uid))) add(info && info.name) }
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 93, client: CLIENT_BUILD }))
+    res.end(JSON.stringify({ ok: true, users: keys.size, online: (io && io.engine ? io.engine.clientsCount : 0), ver: 95, client: CLIENT_BUILD }))
   } else if (url === '/find') {
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const nick = String(q.get('nick') || '').trim()
@@ -1299,5 +1299,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v93: владелец удаляет дубликат из справочника /remove_contact (dirRemoved)) на порту ' + PORT)
+  console.log('SVchat server (v95: владелец удаляет дубликат из справочника /remove_contact (dirRemoved)) на порту ' + PORT)
 })
