@@ -70,7 +70,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 104 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 105 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -557,7 +557,7 @@ function isTrustedOrigin(req) {
   const origin = req.headers['origin'] || ''
   const referer = req.headers['referer'] || ''
   const src = origin || referer
-  if (!src) return true // нет заголовка — server-to-server, разрешаем
+  if (!src) return true
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(src) ||
     /svchat-server\.onrender\.com/.test(src) ||
     /svchat24\.ru/.test(src)
@@ -743,7 +743,7 @@ const server = http.createServer(async (req, res) => {
     res.end('{"ok":true}')
   } else if (appHtml) {
     const ae = String(req.headers['accept-encoding'] || '')
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-cLjPXru7FIvchoaSmIwHaVpMXXJHHVfIAwPHoZzPF2E=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlGz && /\bgzip\b/.test(ae)) {
       h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding'
       res.writeHead(200, h); res.end(appHtmlGz)
@@ -794,17 +794,24 @@ io.on('connection', (socket) => {
     await dbReady
     const room = String(p.room || 'general').slice(0, 64)
     const password = p.password ? String(p.password).slice(0, 64) : null
-    const user = { id: String(p.userId || socket.id).slice(0, 80), name: String(p.name || 'Гость').slice(0, 40), photo: (p.photo && typeof p.photo === 'string' && p.photo.startsWith('data:image/') && p.photo.length < 400000) ? p.photo : null }
-    goOnline(user.id)
-
-    // Привязка аккаунта к секрет-токену (TOFU): claimed id требует совпадения токена
     const auth = p.auth ? String(p.auth).slice(0, 128) : ''
-    const claimed = userAuth.get(user.id)
-    if (claimed) {
-      if (!auth || hashTok(auth) !== claimed) { socket.emit('join_error', { reason: 'id_taken' }); return }
-    } else if (auth) {
-      const th = hashTok(auth); userAuth.set(user.id, th); dbSaveAuth(user.id, th)
+    // TOFU v2: userId с токеном — проверяем; без токена — генерируем на сервере
+    let assignedId = String(p.userId || '').slice(0, 80)
+    if (assignedId) {
+      const claimed = userAuth.get(assignedId)
+      if (claimed) {
+        if (!auth || hashTok(auth) !== claimed) { socket.emit('join_error', { reason: 'id_taken' }); return }
+      } else if (auth) {
+        const th = hashTok(auth); userAuth.set(assignedId, th); dbSaveAuth(assignedId, th)
+      } else {
+        // Нет токена — нельзя доверять userId от клиента, генерируем новый
+        assignedId = 'u-' + crypto.randomBytes(12).toString('hex')
+      }
+    } else {
+      assignedId = 'u-' + crypto.randomBytes(12).toString('hex')
     }
+    const user = { id: assignedId, name: String(p.name || 'Гость').slice(0, 40), photo: (p.photo && typeof p.photo === 'string' && p.photo.startsWith('data:image/') && p.photo.length < 400000) ? p.photo : null }
+    goOnline(user.id)
     // Зарегистрированный аккаунт: ник берём с сервера, подделать нельзя
     const aKey = accountByUid.get(user.id)
     if (aKey && accounts.get(aKey)) user.name = accounts.get(aKey).nick
@@ -863,7 +870,7 @@ io.on('connection', (socket) => {
 
     touchMember(room, me)
 
-    socket.emit('joined', { room, isAdmin: (!!(meta && meta.adminId === me.id)) || isOwner(me.id), locked: !!(meta && meta.password) })
+    socket.emit('joined', { room, id: me.id, isAdmin: (!!(meta && meta.adminId === me.id)) || isOwner(me.id), locked: !!(meta && meta.password) })
     socket.emit('history', { messages: h.slice(-HISTORY_INIT).map(liteEntry), more: h.length > HISTORY_INIT })
     const rd = roomReads.get(room)
     let rdOut = {}
@@ -1274,5 +1281,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v104: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v105: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
