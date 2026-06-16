@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 127 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 128 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -389,7 +389,10 @@ function memberList(room) {
   const out = []
   const reg = roomMembers.get(room)
   if (reg) for (const [id, rec] of reg.entries()) {
-    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: rec.lastSeen || null, photo: rec.photo || null })
+    // lastSeen: берём самое свежее из времени в этой комнате и глобального последнего выхода (seenAt)
+    const gs = seenAt.get(String(id))
+    const ls = (gs && (!rec.lastSeen || gs > rec.lastSeen)) ? gs : (rec.lastSeen || null)
+    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: ls, photo: rec.photo || null })
   }
   // онлайн-пользователи, которых ещё нет в реестре (режим памяти без базы)
   if (m) for (const u of m.values()) {
@@ -760,7 +763,7 @@ const server = http.createServer(async (req, res) => {
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-W5+FWJQrcZB1DyDy87eJsLxUYmGOqR9DGLiPyJ06JEE=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-vC8qoLLE14hhK3Yo793IeuMxF9emHE3ekbI98KVjAXQ=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -1301,5 +1304,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v127: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v128: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
