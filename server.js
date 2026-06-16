@@ -65,7 +65,7 @@ async function pushToRoom(room, exceptUserId, payload) {
       await webpush.sendNotification(sub, data, { TTL: 60 })
     } catch (e) {
       const code = e && e.statusCode
-      if (code === 403 || code === 404 || code === 410) { m.delete(endpoint); unindexSub(userId, endpoint); dbDelSub(endpoint) } // подписка умерла
+      if (code === 400 || code === 403 || code === 404 || code === 410) { m.delete(endpoint); unindexSub(userId, endpoint); dbDelSub(endpoint) } // подписка умерла
     }
   }))
 }
@@ -477,7 +477,7 @@ async function pushToUser(userId, payload) {
   await Promise.all([...u.entries()].map(async ([endpoint, sub]) => {
     try { await webpush.sendNotification(sub, data) } catch (e) {
       const code = e && e.statusCode
-      if (code === 403 || code === 404 || code === 410) { unindexSub(userId, endpoint); dbDelSub(endpoint) } // мёртвый endpoint самоочистится из комнат при pushToRoom
+      if (code === 400 || code === 403 || code === 404 || code === 410) { unindexSub(userId, endpoint); dbDelSub(endpoint) } // мёртвый endpoint самоочистится из комнат при pushToRoom
     }
   }))
 }
@@ -604,23 +604,6 @@ const server = http.createServer(async (req, res) => {
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
-  } else if (url === '/push_test') {
-    // ВРЕМЕННАЯ диагностика push: токен-защита, отправляет тест на все подписки и возвращает коды push-сервиса
-    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    if (q.get('t') !== 'diag-1d7d1e3ec9c6df09') { res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
-    const data = JSON.stringify({ title: 'SVchat', body: 'Тест уведомлений', tag: 'svtest', url: '/' })
-    const seen = new Set(); const results = []
-    for (const [, m] of pushSubs.entries()) {
-      for (const [endpoint, rec] of [...m.entries()]) {
-        if (seen.has(endpoint)) continue; seen.add(endpoint)
-        let status
-        try { const r = await webpush.sendNotification(rec.sub, data, { TTL: 30 }); status = r && r.statusCode } catch (e) { status = (e && e.statusCode) || (e && e.message) || 'err' }
-        let host = '?'; try { host = new URL(endpoint).host } catch {}
-        results.push({ uid: rec.userId, host, status })
-      }
-    }
-    res.end(JSON.stringify({ ok: true, pushEnabled, count: results.length, results }))
   } else if (url === '/sw.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
     res.end(SW_JS)
