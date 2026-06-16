@@ -19,14 +19,7 @@ const HISTORY_LIMIT = 500
 // VAPID_PRIVATE — секрет: задать в Render → Environment → VAPID_PRIVATE.
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC || 'BA-Yx74xj5Oa8MXYY_bN75dEEx6yE7LzL36hFRuP0S9-XpHRutcxAPfa5nLg-xMAxQ3xZ0_7QnuTU7waWYcfDW0'
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE || ''
-// Без приватного ключа push отключаем, но сервер должен подняться (чат важнее уведомлений)
-let pushEnabled = false
-if (VAPID_PRIVATE) {
-  try { webpush.setVapidDetails('mailto:admin@svchat.app', VAPID_PUBLIC, VAPID_PRIVATE); pushEnabled = true }
-  catch (e) { console.error('[push] неверный VAPID-ключ, push отключён:', e.message) }
-} else {
-  console.warn('[push] VAPID_PRIVATE не задан — push-уведомления отключены (задайте env VAPID_PRIVATE)')
-}
+webpush.setVapidDetails('mailto:admin@svchat.app', VAPID_PUBLIC, VAPID_PRIVATE)
 
 // room -> Map<endpoint, { sub, userId }>
 const pushSubs = new Map()
@@ -52,7 +45,6 @@ function addSub(room, userId, sub) {
   indexSub(userId, sub.endpoint, sub)
 }
 async function pushToRoom(room, exceptUserId, payload) {
-  if (!pushEnabled) return
   const m = pushSubs.get(room)
   if (!m) return
   const online = onlineIdsIn(room)
@@ -78,7 +70,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 126 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 119 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
@@ -469,7 +461,6 @@ function dmRoomId(a, b) {
 }
 // Push конкретному человеку по userId — ищем его подписки во всех комнатах
 async function pushToUser(userId, payload) {
-  if (!pushEnabled) return
   const u = userSubs.get(String(userId))
   if (!u || !u.size) return
   const data = JSON.stringify(payload)
@@ -491,11 +482,6 @@ let appHtml = null
 try { appHtml = fs.readFileSync(path.join(__dirname, 'index.html')) } catch {}
 let appHtmlGz = null
 try { if (appHtml) appHtmlGz = zlib.gzipSync(appHtml) } catch {}
-// ETag по содержимому: повторные загрузки получают 304 без перекачки ~100КБ
-const appHtmlEtag = appHtml ? '"' + crypto.createHash('sha256').update(appHtml).digest('hex').slice(0, 16) + '"' : null
-// Brotli (меньше gzip на ~18%) считаем асинхронно, чтобы не задерживать старт сервера
-let appHtmlBr = null
-if (appHtml) zlib.brotliCompress(appHtml, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } }, (e, out) => { if (!e) appHtmlBr = out })
 
 const SW_JS = `
 self.addEventListener('install', e => self.skipWaiting())
@@ -757,15 +743,9 @@ const server = http.createServer(async (req, res) => {
     res.end('{"ok":true}')
   } else if (appHtml) {
     const ae = String(req.headers['accept-encoding'] || '')
-    if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
-      res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
-    }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-SxoxiSWsdrTqIVLeqCyGkArjcGrw32aGe2zgPHgMQv8=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
-    if (appHtmlBr && /\bbr\b/.test(ae)) {
-      h['Content-Encoding'] = 'br'
-      res.writeHead(200, h); res.end(appHtmlBr)
-    } else if (appHtmlGz && /\bgzip\b/.test(ae)) {
-      h['Content-Encoding'] = 'gzip'
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache, no-store, must-revalidate', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-JUffWlcHFfha2MKw6lXbiPx8u2sB6PtR3ZBM4uRO8wA=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data:; worker-src 'self' blob:; frame-ancestors 'none'" }
+    if (appHtmlGz && /\bgzip\b/.test(ae)) {
+      h['Content-Encoding'] = 'gzip'; h['Vary'] = 'Accept-Encoding'
       res.writeHead(200, h); res.end(appHtmlGz)
     } else {
       res.writeHead(200, h); res.end(appHtml)
@@ -1301,5 +1281,5 @@ io.on('connection', (socket) => {
 })
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v126: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v119: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
