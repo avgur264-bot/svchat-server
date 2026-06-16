@@ -603,7 +603,7 @@ const server = http.createServer(async (req, res) => {
   const url = (req.url || '/').split('?')[0]
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
-    res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool }))
+    res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
   } else if (url === '/sw.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
     res.end(SW_JS)
