@@ -622,23 +622,6 @@ const server = http.createServer(async (req, res) => {
     const online = []
     for (const [uid, set] of liveOnline.entries()) if (set && set.size > 0) online.push(uid)
     res.end(JSON.stringify({ online }))
-  } else if (url === '/push_test') {
-    // ВРЕМЕННАЯ диагностика push (токен): тест на все подписки, возвращает коды push-сервиса
-    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    if (q.get('t') !== 'diag-bf65f91f054c3e34') { res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
-    const data = JSON.stringify({ title: 'SVchat', body: 'Тест уведомлений ✅', tag: 'svtest', url: '/' })
-    const seen = new Set(); const results = []
-    for (const [, m] of pushSubs.entries()) {
-      for (const [endpoint, rec] of [...m.entries()]) {
-        if (seen.has(endpoint)) continue; seen.add(endpoint)
-        let status
-        try { const r = await webpush.sendNotification(rec.sub, data, { TTL: 30 }); status = r && r.statusCode } catch (e) { status = (e && e.statusCode) || (e && e.message) || 'err' }
-        let host = '?'; try { host = new URL(endpoint).host } catch {}
-        results.push({ uid: rec.userId, host, status })
-      }
-    }
-    res.end(JSON.stringify({ ok: true, pushEnabled, count: results.length, results }))
   } else if (url === '/sw.js') {
     res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
     res.end(SW_JS)
