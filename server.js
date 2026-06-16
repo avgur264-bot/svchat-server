@@ -78,9 +78,10 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 129 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 130 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
+const EMPTY_SET = new Set()
 const dirRemoved = new Set() // userId, удалённые владельцем из справочника (дубликаты)
 const seenAt = new Map() // userId -> ISO: время последнего выхода
 const readHidden = new Set() // userId: скрывает статус прочтения (реципрокно, кроме владельца)
@@ -392,11 +393,12 @@ function memberList(room) {
     // lastSeen: берём самое свежее из времени в этой комнате и глобального последнего выхода (seenAt)
     const gs = seenAt.get(String(id))
     const ls = (gs && (!rec.lastSeen || gs > rec.lastSeen)) ? gs : (rec.lastSeen || null)
-    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), isAdmin: adminId === id, lastSeen: ls, photo: rec.photo || null })
+    const appOn = (liveOnline.get(String(id)) || EMPTY_SET).size > 0
+    out.push({ id, name: rec.name, online: onlineIds.has(String(id)), appOnline: appOn, isAdmin: adminId === id, lastSeen: ls, photo: rec.photo || null })
   }
   // онлайн-пользователи, которых ещё нет в реестре (режим памяти без базы)
   if (m) for (const u of m.values()) {
-    if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, isAdmin: adminId === u.id, lastSeen: null, photo: u.photo || null })
+    if (!reg || !reg.has(String(u.id))) out.push({ id: u.id, name: u.name, online: true, appOnline: true, isAdmin: adminId === u.id, lastSeen: null, photo: u.photo || null })
   }
   out.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name), 'ru'))
   return out
@@ -419,6 +421,14 @@ function touchMember(room, user) {
 
 function broadcastMembers(room) {
   io.to(room).emit('members', { members: memberList(room) })
+}
+// При смене присутствия (онлайн/офлайн) обновляем шапки личных чатов этого пользователя
+function broadcastPresenceToDms(uid) {
+  uid = String(uid || '')
+  if (!uid) return
+  for (const [room, reg] of roomMembers.entries()) {
+    if (room.startsWith('dm:') && reg.has(uid)) broadcastMembers(room)
+  }
 }
 
 const HISTORY_INIT = 50 // сколько сообщений отдаём при входе
@@ -763,7 +773,7 @@ const server = http.createServer(async (req, res) => {
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-Hkhoih32aZvv6KDrWoyRnaOMZHtq7Uu/PzoLnZBaF7s=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-XHxLv30q7BOXFvtEc9aFy/ybrjwIqrmJ7LGA6IPjNcM=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -791,7 +801,7 @@ io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
   let pUid = null
-  const goOnline = (uid) => { uid = String(uid || ''); if (!uid) return; pUid = uid; if (!liveOnline.has(uid)) liveOnline.set(uid, new Set()); liveOnline.get(uid).add(socket.id) }
+  const goOnline = (uid) => { uid = String(uid || ''); if (!uid) return; pUid = uid; const was = (liveOnline.get(uid) || EMPTY_SET).size > 0; if (!liveOnline.has(uid)) liveOnline.set(uid, new Set()); liveOnline.get(uid).add(socket.id); if (!was) broadcastPresenceToDms(uid) }
   // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
   const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [], med: [], old: [] }
   function allow(kind, max, windowMs) {
@@ -1288,7 +1298,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     if (pUid) {
       const s = liveOnline.get(pUid)
-      if (s) { s.delete(socket.id); if (s.size === 0) { liveOnline.delete(pUid); const ts = new Date().toISOString(); seenAt.set(pUid, ts); dbSaveSeen(pUid, ts) } }
+      if (s) { s.delete(socket.id); if (s.size === 0) { liveOnline.delete(pUid); const ts = new Date().toISOString(); seenAt.set(pUid, ts); dbSaveSeen(pUid, ts); broadcastPresenceToDms(pUid) } }
     }
     if (currentRoom && roomUsers.has(currentRoom)) {
       roomUsers.get(currentRoom).delete(socket.id)
@@ -1313,5 +1323,5 @@ setInterval(() => {
 }, 60000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v129: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v130: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
