@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 131 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 132 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const EMPTY_SET = new Set()
@@ -778,7 +778,7 @@ const server = http.createServer(async (req, res) => {
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-Wy1VrzUkFkGo5vAranDdiSGFSWJ7K2e+qnG/RNEilNg=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-rQVWWlOzvTcMa3L8BQWWa3Jah/scedmONf/fB8ndcVY=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -806,7 +806,7 @@ io.on('connection', (socket) => {
   let currentRoom = null
   let me = null
   let pUid = null
-  const goOnline = (uid) => { uid = String(uid || ''); if (!uid) return; pUid = uid; const was = (liveOnline.get(uid) || EMPTY_SET).size > 0; if (!liveOnline.has(uid)) liveOnline.set(uid, new Set()); liveOnline.get(uid).add(socket.id); if (!was) broadcastPresenceToDms(uid) }
+  const goOnline = (uid) => { uid = String(uid || ''); if (!uid) return; pUid = uid; const was = (liveOnline.get(uid) || EMPTY_SET).size > 0; if (!liveOnline.has(uid)) liveOnline.set(uid, new Set()); liveOnline.get(uid).add(socket.id); if (!was) { broadcastPresenceToDms(uid); io.emit('presence', { id: uid, on: true }) } }
   // Антифлуд: не более ~8 сообщений за 5 сек и ~20 join за 30 сек на соединение
   const rl = { msg: [], join: [], typing: [], signal: [], dm: [], rw: [], med: [], old: [] }
   function allow(kind, max, windowMs) {
@@ -826,6 +826,13 @@ io.on('connection', (socket) => {
   })
 
   socket.on('rtt', (ts, ack) => { if (typeof ack === 'function') ack(1) })
+
+  // Снимок присутствия по запросу (для индикаторов онлайна в списке чатов)
+  socket.on('get_presence', () => {
+    const online = []
+    for (const [uid, set] of liveOnline.entries()) if (set && set.size > 0) online.push(uid)
+    socket.emit('presence_all', { online })
+  })
 
   socket.on('join', async (p = {}) => {
     if (!allow('join', 20, 30000)) { socket.emit('join_error', { reason: 'rate_limited' }); return }
@@ -1303,7 +1310,7 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     if (pUid) {
       const s = liveOnline.get(pUid)
-      if (s) { s.delete(socket.id); if (s.size === 0) { liveOnline.delete(pUid); const ts = new Date().toISOString(); seenAt.set(pUid, ts); dbSaveSeen(pUid, ts); broadcastPresenceToDms(pUid) } }
+      if (s) { s.delete(socket.id); if (s.size === 0) { liveOnline.delete(pUid); const ts = new Date().toISOString(); seenAt.set(pUid, ts); dbSaveSeen(pUid, ts); broadcastPresenceToDms(pUid); io.emit('presence', { id: pUid, on: false }) } }
     }
     if (currentRoom && roomUsers.has(currentRoom)) {
       roomUsers.get(currentRoom).delete(socket.id)
@@ -1328,5 +1335,5 @@ setInterval(() => {
 }, 60000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v131: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v132: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
