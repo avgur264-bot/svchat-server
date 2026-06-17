@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 145 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 146 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const EMPTY_SET = new Set()
@@ -802,7 +802,7 @@ else{
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-isfty5MQcjQW/N4M/AoWr1R5egxqF4KjFOzPv5FlcAI=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-klpVLdcS1WWQDSUbGs5Lv223cM2iO+Gib865wr7SDRg=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -1225,6 +1225,33 @@ io.on('connection', (socket) => {
     dbSaveAccount(key, nick, userId, passHash)
     if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
     ack({ ok: true, userId, nick, created: true })
+  })
+
+  // Список комнат пользователя (для синхронизации чатов при входе с другого устройства).
+  // Возвращаем все комнаты, где есть его userId, чтобы клиент восстановил список чатов.
+  socket.on('my_rooms', async (p = {}, ack) => {
+    if (typeof ack !== 'function') return
+    if (!allow('med', 30, 10000)) { ack({ ok: false, reason: 'rate_limited' }); return }
+    await dbReady
+    const userId = String(p.userId || '').slice(0, 80)
+    const token = p.auth ? String(p.auth).slice(0, 128) : ''
+    if (!userId || !ownsUid(userId, token)) { ack({ ok: false, reason: 'forbidden' }); return }
+    const rooms = []
+    for (const [room, reg] of roomMembers.entries()) {
+      if (!reg || !reg.has(String(userId))) continue
+      if (room.indexOf('dm:') === 0) {
+        const parts = room.split(':') // ['dm', id1, id2]
+        const peerId = parts[1] === String(userId) ? parts[2] : parts[1]
+        let peer = ''
+        const rec = reg.get(String(peerId)); if (rec && rec.name) peer = rec.name
+        if (!peer) { const k = accountByUid.get(peerId); if (k) { const a = accounts.get(k); if (a) peer = a.nick } }
+        rooms.push({ room, dm: 1, peer: peer || 'Личный чат', pass: null })
+      } else {
+        const meta = roomMeta.get(room)
+        rooms.push({ room, pass: (meta && meta.password) ? meta.password : null })
+      }
+    }
+    ack({ ok: true, rooms })
   })
 
   // Установить/сменить пароль своего аккаунта (для тех, кто зашёл до появления аккаунтов)
