@@ -5,6 +5,8 @@
   "description": "Playwright E2E тесты для SVchat",
   "scripts": {
     "test": "playwright test",
+    "test:smoke": "playwright test --grep-invert @realtime",
+    "test:realtime": "playwright test --grep @realtime",
     "test:headed": "playwright test --headed",
     "test:report": "playwright show-report"
   },
