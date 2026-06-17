@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 135 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 136 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const EMPTY_SET = new Set()
@@ -587,8 +587,7 @@ function isTrustedOrigin(req) {
   if (!src) return true
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(src) ||
     /svchat-server\.onrender\.com/.test(src) ||
-    /svchat24\.ru/.test(src) ||
-    /svchat\.ru/.test(src)
+    /svchat24\.ru/.test(src)
 }
 function readBody(req) {
   return new Promise(resolve => {
@@ -779,7 +778,7 @@ const server = http.createServer(async (req, res) => {
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-n723qHWSQ6iGf9GiN/+inJRgVK5RiohyhAOw50rsLQQ=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-IwdtaQHulyBkWCckS1Ysqxboy+VRwZ0Tbva7odfzqHo=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -798,7 +797,7 @@ const server = http.createServer(async (req, res) => {
 // ── Socket.IO ────────────────────────────────────────────────────────────────
 const io = new Server(server, {
   maxHttpBufferSize: 45e6, // с запасом над клиентским лимитом ~22 МБ видео
-  cors: { origin: (origin, cb) => { const ok = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) || /svchat-server\.onrender\.com$/.test(origin) || /svchat24\.ru$/.test(origin) || /svchat\.ru$/.test(origin); cb(null, ok); }, methods: ['GET', 'POST'] },
+  cors: { origin: (origin, cb) => { const ok = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin) || /svchat-server\.onrender\.com$/.test(origin) || /svchat24\.ru$/.test(origin); cb(null, ok); }, methods: ['GET', 'POST'] },
   pingInterval: 25000,
   pingTimeout: 20000,
 })
@@ -1338,5 +1337,5 @@ setInterval(() => {
 }, 60000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v135: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v136: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
