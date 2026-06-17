@@ -645,6 +645,16 @@ else{
   });
 }
 </script></body></html>`)
+  } else if (url === '/_admin_release') {
+    const qs = (req.url.split('?')[1] || '')
+    const params = new URLSearchParams(qs)
+    const key = params.get('key') || ''
+    const uid = (params.get('uid') || '').slice(0, 80)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    if (key !== 'k7Qm2xZr9vT4nB8wRel') { res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
+    const hadKey = accountByUid.get(uid) || null
+    releaseAccount(uid)
+    res.end(JSON.stringify({ ok: true, released: uid, hadKey }))
   } else if (url === '/presence') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
     const online = []
