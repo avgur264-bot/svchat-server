@@ -617,6 +617,24 @@ const server = http.createServer(async (req, res) => {
   if (url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
+  } else if (url === '/diag') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss: https:" })
+    res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SVchat диагностика</title><style>body{font:18px/1.5 -apple-system,system-ui,sans-serif;margin:0;padding:18px;background:#0b1020;color:#fff}h1{font-size:20px}#log div{padding:10px 12px;margin:8px 0;border-radius:10px;background:#1b2440;word-break:break-word}.ok{background:#0f5132 !important}.err{background:#842029 !important}.big{font-size:22px;font-weight:700}</style></head><body><h1>SVchat — диагностика связи</h1><div id="log"></div><script src="/socket.io/socket.io.js"></script><script>
+var L=document.getElementById('log');
+function add(t,c){var d=document.createElement('div');d.textContent=t;if(c)d.className=c;L.appendChild(d);}
+add('Загружаю Socket.IO...');
+try{
+  if(typeof io==='undefined'){add('❌ Socket.IO client НЕ загрузился','err');}
+  else{
+    add('✅ Socket.IO загружен. Подключаюсь (polling)...');
+    var s=io({transports:['polling'],reconnection:false});
+    var t0=Date.now(),done=false;
+    var to=setTimeout(function(){if(!done){done=true;add('⏱ ТАЙМАУТ 20с — сокет НЕ подключился','err');var tr=(s.io&&s.io.engine&&s.io.engine.transport)?s.io.engine.transport.name:'?';add('последний transport: '+tr,'err');}},20000);
+    s.on('connect',function(){done=true;clearTimeout(to);add('✅ СОКЕТ ПОДКЛЮЧЁН за '+(Date.now()-t0)+' мс','ok big');add('transport: '+(s.io.engine.transport?s.io.engine.transport.name:'?'));add('Пробую обмен с сервером (auth_account)...');var rt=Date.now();s.timeout(15000).emit('auth_account',{nick:'x',password:'',auth:null},function(err,res){if(err){add('❌ обмен НЕ дошёл (таймаут/ошибка): '+err,'err');}else{add('✅ сервер ответил за '+(Date.now()-rt)+' мс: '+JSON.stringify(res),'ok');}});});
+    s.on('connect_error',function(e){done=true;clearTimeout(to);add('❌ ОШИБКА подключения: '+(e&&e.message?e.message:e),'err');if(e&&e.description)add('код/описание: '+e.description,'err');});
+  }
+}catch(e){add('❌ Исключение: '+(e&&e.message?e.message:e),'err');}
+</script></body></html>`)
   } else if (url === '/presence') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
     const online = []
