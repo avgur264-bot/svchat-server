@@ -622,23 +622,27 @@ const server = http.createServer(async (req, res) => {
     res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SVchat диагностика</title><style>body{font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1020;color:#fff}h1{font-size:19px}#log div{padding:9px 11px;margin:7px 0;border-radius:10px;background:#1b2440;word-break:break-word}.ok{background:#0f5132 !important}.err{background:#842029 !important}.big{font-size:20px;font-weight:700}</style></head><body><h1>SVchat — диагностика связи</h1><div id="log"></div><script src="/socket.io/socket.io.js"></script><script>
 var L=document.getElementById('log');
 function add(t,c){var d=document.createElement('div');d.textContent=t;if(c)d.className=c;L.appendChild(d);}
-function test(label,url,opts){
-  add('— '+label+' —');
-  try{
-    var s=url?io(url,opts):io(opts);
-    var t0=Date.now(),done=false;
-    var to=setTimeout(function(){if(!done){done=true;var tr=(s.io&&s.io.engine&&s.io.engine.transport)?s.io.engine.transport.name:'?';add('⏱ '+label+': ТАЙМАУТ, не подключился (transport:'+tr+')','err');}},18000);
-    s.on('connect',function(){if(done)return;done=true;clearTimeout(to);add('✅ '+label+': ПОДКЛЮЧЁН за '+(Date.now()-t0)+'мс, transport:'+(s.io.engine.transport?s.io.engine.transport.name:'?'),'ok big');});
-    s.on('connect_error',function(e){if(done)return;done=true;clearTimeout(to);add('❌ '+label+': ОШИБКА: '+(e&&e.message?e.message:e)+(e&&e.description?(' / '+e.description):''),'err');});
-  }catch(e){add('❌ '+label+': исключение '+(e&&e.message?e.message:e),'err');}
-}
-add('origin = '+location.origin);
-if(typeof io==='undefined'){add('❌ Socket.IO client НЕ загрузился','err');}
+var prof=null,tok='';
+try{prof=JSON.parse(localStorage.getItem('svchat_profile')||'null')}catch(_){}
+try{tok=localStorage.getItem('svchat_token')||''}catch(_){}
+if(!prof){add('⚠️ На этом устройстве вход НЕ выполнен (нет профиля). Открой эту страницу там, где ты залогинен.','err');}
+else{add('Аккаунт на этом устройстве: '+(prof.name||'?'));add('userId: '+(prof.id||'?'));}
+if(typeof io==='undefined'){add('❌ Socket.IO не загрузился','err');}
 else{
-  var o={transports:['polling'],reconnection:false};
-  test('A: io() стандарт',null,o);
-  test('B: io(origin) как приложение',location.origin,{transports:['polling'],reconnection:false,timeout:20000});
-  test('C: io(wss://host)','wss://'+location.host,{transports:['polling'],reconnection:false});
+  var s=io({transports:['polling'],reconnection:false});
+  var done=false,to=setTimeout(function(){if(!done){done=true;add('⏱ Таймаут подключения','err');}},18000);
+  s.on('connect_error',function(e){if(done)return;done=true;clearTimeout(to);add('❌ Ошибка подключения: '+(e&&e.message?e.message:e),'err');});
+  s.on('connect',function(){if(done)return;done=true;clearTimeout(to);add('✅ Подключено к серверу','ok');
+    if(!prof){return;}
+    add('Спрашиваю сервер: какие комнаты у этого аккаунта...');
+    s.timeout(12000).emit('my_rooms',{userId:prof.id,auth:tok},function(err,res){
+      if(err){add('❌ my_rooms ошибка/таймаут: '+err,'err');return;}
+      if(!res||!res.ok){add('❌ Отказ: '+((res&&res.reason)||'?')+((res&&res.reason==='forbidden')?' — этот userId принадлежит другому токену (на этом устройстве другой/новый аккаунт)':''),'err');return;}
+      add('✅ Комнат на сервере у этого аккаунта: '+res.rooms.length,'ok big');
+      res.rooms.forEach(function(r){add(r.dm?('• Личный чат с: '+(r.peer||'?')):('• Группа: '+r.room));});
+      if(!res.rooms.length){add('Похоже, это НЕ тот аккаунт, где 8 чатов. Нужно войти под ником основного аккаунта (с паролем).','err');}
+    });
+  });
 }
 </script></body></html>`)
   } else if (url === '/presence') {
