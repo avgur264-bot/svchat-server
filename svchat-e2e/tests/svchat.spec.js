@@ -147,10 +147,62 @@ test('8. Мобильная вёрстка — нет горизонтально
   }
 });
 
-// 9. Статус «прочитано» (✓✓). CSS-классы статуса в минифицированном бандле меняются —
-// селектор нужно сверить через DevTools на живой версии. Включить, когда селектор уточнён.
-test.fixme('9. Статус сообщения меняется на «прочитано» (✓✓)', async () => {});
+test('9. Статус сообщения меняется на «прочитано» (✓✓)', async ({ browser }) => {
+  const room = 'e2e-read-' + Date.now();
+  const cA = await browser.newContext({ ignoreHTTPSErrors: INSECURE });
+  const cB = await browser.newContext({ ignoreHTTPSErrors: INSECURE });
+  await seed(cA, { name: 'Алиса', id: 'u-e2e-ra-' + Date.now() });
+  await seed(cB, { name: 'Боб', id: 'u-e2e-rb-' + Date.now() });
+  const a = await cA.newPage();
+  const b = await cB.newPage();
+  try {
+    await a.goto('/'); await enterRoom(a, room);
+    const text = 'read-' + Date.now();
+    await sendMessage(a, text);
+    await expect(a.getByText(text).first()).toBeVisible();
+    // Боб входит в ту же комнату и читает → у Алисы статус становится ✓✓ (синий)
+    await b.goto('/'); await enterRoom(b, room);
+    await expect(b.getByText(text).first()).toBeVisible({ timeout: 15000 });
+    await expect(a.getByText('✓✓').first()).toBeVisible({ timeout: 15000 });
+  } finally {
+    await cA.close(); await cB.close();
+  }
+});
 
-// 10. Личный чат + индикатор шифрования (🔒). Требует реального пира из справочника
-// и установленного E2E-ключа — оформляется отдельным сценарием. Включить после настройки.
-test.fixme('10. Личный чат показывает индикатор шифрования 🔒', async () => {});
+test('10. Личный чат показывает индикатор шифрования 🔒', async ({ browser }) => {
+  const idA = 'u-e2e-da-' + Date.now();
+  const idB = 'u-e2e-db-' + Date.now();
+  const dm = 'dm:' + [idA, idB].sort().join(':'); // детерминированный id личной комнаты
+  const cA = await browser.newContext({ ignoreHTTPSErrors: INSECURE });
+  const cB = await browser.newContext({ ignoreHTTPSErrors: INSECURE });
+  await seed(cA, { name: 'Алиса', id: idA });
+  await seed(cB, { name: 'Боб', id: idB });
+  const a = await cA.newPage();
+  const b = await cB.newPage();
+  try {
+    // оба открывают одну личку по URL → клиенты обмениваются ключами → включается E2E
+    await b.goto('/?room=' + encodeURIComponent(dm) + '&dm=' + encodeURIComponent('Алиса'));
+    await b.getByPlaceholder('Сообщение...').waitFor({ timeout: 20000 });
+    await a.goto('/?room=' + encodeURIComponent(dm) + '&dm=' + encodeURIComponent('Боб'));
+    await a.getByPlaceholder('Сообщение...').waitFor({ timeout: 20000 });
+    await waitForConnected(a);
+    // индикатор 🔒 в шапке (span title="Зашифровано (E2E)")
+    await expect(a.getByTitle('Зашифровано (E2E)')).toBeVisible({ timeout: 25000 });
+  } finally {
+    await cA.close(); await cB.close();
+  }
+});
+
+test('11. Отправка файла — карточка с именем появляется', async ({ context, page }) => {
+  await seed(context, { name: 'Алиса E2E', id: 'u-e2e-file' });
+  await page.goto('/');
+  await enterRoom(page, 'e2e-file-' + Date.now());
+  await page.getByRole('button', { name: 'Прикрепить' }).click(); // открыть меню вложений
+  const fname = 'e2e-doc-' + Date.now() + '.txt';
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByText('Файл', { exact: true }).click(),
+  ]);
+  await chooser.setFiles({ name: fname, mimeType: 'text/plain', buffer: Buffer.from('hello e2e file') });
+  await expect(page.getByText(fname).first()).toBeVisible({ timeout: 15000 });
+});
