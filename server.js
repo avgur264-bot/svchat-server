@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 133 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 134 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const EMPTY_SET = new Set()
@@ -778,7 +778,7 @@ const server = http.createServer(async (req, res) => {
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-K7nwHHeWGMZbxAeZbo7mMHd8UWELmIoY5quYgZnNV9k=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-3HfmHiu4mU/WIvBQOdHQXpJgK6ItQq3bNutyxWZhoOY=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-Q8eV7m/neHEf59aJ8eHIVM/H+ZFsZDZ60J1a4ikVEkQ=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -942,11 +942,11 @@ io.on('connection', (socket) => {
     msg.text = (msg.text == null) ? '' : String(msg.text)
     if (msg.text.length > 4000) msg.text = msg.text.slice(0, 4000)
     // Валидация типа и медиа: только data:-URL, лимиты по типу
-    const MT = ['text', 'photo', 'video', 'voice']
+    const MT = ['text', 'photo', 'video', 'voice', 'file']
     if (!MT.includes(msg.msgType)) msg.msgType = 'text'
     if (msg.dataUrl != null) {
       const du = String(msg.dataUrl)
-      const cap = msg.msgType === 'video' ? 32e6 : msg.msgType === 'photo' ? 8e6 : msg.msgType === 'voice' ? 6e6 : 0
+      const cap = msg.msgType === 'video' ? 32e6 : msg.msgType === 'photo' ? 8e6 : msg.msgType === 'voice' ? 6e6 : msg.msgType === 'file' ? 15e6 : 0
       if ((!msg.enc && !du.startsWith('data:')) || du.length > cap) {
         if (typeof ack === 'function') ack({ ok: false, error: 'bad_media' })
         return
@@ -974,6 +974,8 @@ io.on('connection', (socket) => {
       dataUrl: msg.dataUrl,
       dur: msg.dur,
       len: msg.len,
+      fileName: msg.fileName ? String(msg.fileName).slice(0, 200) : undefined,
+      fileSize: typeof msg.fileSize === 'number' ? msg.fileSize : undefined,
       time: new Date().toISOString(),
     }
     const h = getHistory(currentRoom)
@@ -996,7 +998,7 @@ io.on('connection', (socket) => {
       const other = mm.find(x => x !== String(me.id))
       if (other && !onlineIdsIn(currentRoom).has(other)) pushToUser(other, {
         title: '\u{1F4AC} ' + me.name,
-        body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
+        body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : entry.msgType === 'file' ? '\u{1F4CE} Файл' : String(entry.text || 'Сообщение').slice(0, 120),
         tag: 'svchat-' + currentRoom,
         room: currentRoom,
         url: '/?room=' + encodeURIComponent(currentRoom) + '&dm=' + encodeURIComponent(me.name)
@@ -1005,7 +1007,7 @@ io.on('connection', (socket) => {
     }
     pushToRoom(currentRoom, me.id, {
       title: me.name + ' · ' + currentRoom,
-      body: entry.msgType === 'photo' ? '📷 Фото' : entry.msgType === 'video' ? '🎬 Видео' : entry.msgType === 'voice' ? '🎤 Голосовое' : String(entry.text || 'Сообщение').slice(0, 120),
+      body: entry.msgType === 'photo' ? '📷 Фото' : entry.msgType === 'video' ? '🎬 Видео' : entry.msgType === 'voice' ? '🎤 Голосовое' : entry.msgType === 'file' ? '📎 Файл' : String(entry.text || 'Сообщение').slice(0, 120),
       tag: 'svchat-' + currentRoom,
       room: currentRoom,
       url: '/?room=' + encodeURIComponent(currentRoom)
@@ -1335,5 +1337,5 @@ setInterval(() => {
 }, 60000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v133: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
+  console.log('SVchat server (v134: sync ver=CLIENT_BUILD, remove dead /contacts endpoint) на порту ' + PORT)
 })
