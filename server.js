@@ -722,6 +722,7 @@ else{
       const id = String(uid || '')
       const nme = String(nm || '').trim()
       if (!id || !nme || id === meId) return
+      if (id.indexOf('u-e2e-') === 0) return // тестовые аккаунты из автотестов — не показывать в справочнике
       if (dirRemoved.has(id)) return
       const hid = hiddenUsers.has(id)
       if (hid && !showHidden) return
