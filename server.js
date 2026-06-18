@@ -645,6 +645,18 @@ else{
   });
 }
 </script></body></html>`)
+  } else if (url === '/_admin_hidename') {
+    await dbReady
+    const params = new URLSearchParams((req.url.split('?')[1] || ''))
+    const key = params.get('key') || ''
+    const name = (params.get('name') || '').trim().toLowerCase()
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    if (key !== 'h9Pm3xQ7tZ2vNb8') { res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
+    const hit = new Set()
+    for (const a of accounts.values()) { if (String(a.nick || '').trim().toLowerCase() === name) hit.add(String(a.userId)) }
+    for (const m of roomMembers.values()) for (const [uid, info] of m.entries()) { if (info && String(info.name || '').trim().toLowerCase() === name) hit.add(String(uid)) }
+    for (const id of hit) { dirRemoved.add(id); dbSaveDirRemoved(id) }
+    res.end(JSON.stringify({ ok: true, name, hidden: [...hit] }))
   } else if (url === '/presence') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
     const online = []
