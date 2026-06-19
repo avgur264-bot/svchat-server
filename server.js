@@ -645,19 +645,6 @@ else{
   });
 }
 </script></body></html>`)
-  } else if (url === '/_admin_clearauth') {
-    await dbReady
-    const params = new URLSearchParams((req.url.split('?')[1] || ''))
-    const key = params.get('key') || ''
-    const nick = (params.get('nick') || '').trim()
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
-    if (key !== 'c3Vn8kRm2xQpZ') { res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
-    const acc = accounts.get(nickKey(nick))
-    if (!acc) { res.end(JSON.stringify({ ok: false, reason: 'no_account' })); return }
-    const uid = acc.userId
-    userAuth.delete(uid)
-    try { if (pool) await pool.query(`DELETE FROM svchat_auth WHERE user_id = $1`, [uid]) } catch (e) {}
-    res.end(JSON.stringify({ ok: true, nick, userId: uid }))
   } else if (url === '/presence') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*' })
     const online = []
