@@ -1028,6 +1028,15 @@ io.on('connection', (socket) => {
     if (isDm(currentRoom)) {
       const mm = dmMembers(currentRoom) || []
       const other = mm.find(x => x !== String(me.id))
+      // Надёжность: гарантируем, что получатель числится участником лички —
+      // тогда чат подтянется у него при следующем открытии, даже если приглашение было пропущено.
+      if (other) {
+        const reg = roomMembers.get(currentRoom)
+        if (!reg || !reg.has(String(other))) {
+          const k = accountByUid.get(String(other))
+          touchMember(currentRoom, { id: other, name: (k && accounts.get(k)) ? accounts.get(k).nick : 'Собеседник' })
+        }
+      }
       if (other && !onlineIdsIn(currentRoom).has(other)) pushToUser(other, {
         title: '\u{1F4AC} ' + me.name,
         body: entry.msgType === 'photo' ? '\u{1F4F7} Фото' : entry.msgType === 'video' ? '\u{1F3AC} Видео' : entry.msgType === 'voice' ? '\u{1F3A4} Голосовое' : entry.msgType === 'file' ? '\u{1F4CE} Файл' : String(entry.text || 'Сообщение').slice(0, 120),
@@ -1181,6 +1190,12 @@ io.on('connection', (socket) => {
     const targetId = String(p.targetId || '')
     if (!targetId || targetId === String(me.id)) return
     const dm = dmRoomId(me.id, targetId)
+    // Надёжность: сразу регистрируем ОБОИХ участников в комнате, чтобы личный чат
+    // подтянулся у адресата при следующем открытии приложения через my_rooms —
+    // даже если он сейчас офлайн и пропустит живое приглашение, и даже без push.
+    const accNick = (uid, fallback) => { const k = accountByUid.get(String(uid)); if (k && accounts.get(k)) return accounts.get(k).nick; return String(fallback || '').slice(0, 40) || 'Собеседник' }
+    touchMember(dm, { id: me.id, name: me.name })
+    touchMember(dm, { id: targetId, name: accNick(targetId, p.targetName) })
     // Доставляем приглашение всем живым сокетам адресата, где бы он ни был в приложении
     let deliveredLive = false
     const sentTo = new Set()
