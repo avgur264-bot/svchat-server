@@ -753,13 +753,41 @@ else{
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify(acc ? { ok: true, userId: acc.userId, nick: acc.nick } : { ok: false }))
   } else if (url === '/_diag_dm') {
-    // ВРЕМЕННО: диагностика расхождения ID в личных чатах. Удалить после использования.
+    // ВРЕМЕННО: диагностика/починка расхождения ID в личных чатах. Удалить после использования.
     await dbReady
     const q = new URLSearchParams((req.url || '').split('?')[1] || '')
     const needle = String(q.get('q') || '').trim().toLowerCase()
+    const action = String(q.get('action') || '')
+    const keep = String(q.get('keep') || '')
+    const drop = String(q.get('drop') || '')
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
-    if (!pool || !needle) { res.end(JSON.stringify({ ok: false, error: 'need ?q=имя и БД' })); return }
+    if (!pool) { res.end(JSON.stringify({ ok: false, error: 'нет БД' })); return }
     try {
+      // Действие: вернуть настоящий аккаунт в справочник (keep) и спрятать старый дубль (drop)
+      if (action === 'fix') {
+        const done = []
+        if (keep) {
+          dirRemoved.delete(keep); hiddenUsers.delete(keep)
+          await pool.query(`DELETE FROM svchat_dirremoved WHERE user_id = $1`, [keep])
+          await pool.query(`DELETE FROM svchat_hidden WHERE user_id = $1`, [keep])
+          done.push('вернул в справочник: ' + keep)
+        }
+        if (drop) {
+          dirRemoved.add(drop); dbSaveDirRemoved(drop)
+          done.push('спрятал дубль: ' + drop)
+        }
+        res.end(JSON.stringify({ ok: true, done }, null, 2)); return
+      }
+      // Диагностика по имени: какие ID существуют и их статус
+      let who = null
+      if (needle) {
+        const ids = new Map()
+        const tag = (id, nm, src) => { if (!id) return; const e = ids.get(id) || { id, names: new Set(), src: new Set() }; if (nm) e.names.add(nm); e.src.add(src); ids.set(id, e) }
+        for (const a of accounts.values()) if (String(a.nick || '').toLowerCase().includes(needle)) tag(a.userId, a.nick, 'account')
+        const mem0 = await pool.query(`SELECT DISTINCT user_id, name FROM svchat_members`)
+        for (const r of mem0.rows) if (String(r.name || '').toLowerCase().includes(needle)) tag(r.user_id, r.name, 'member')
+        who = [...ids.values()].map(e => ({ id: e.id, names: [...e.names], src: [...e.src], dirRemoved: dirRemoved.has(e.id), hidden: hiddenUsers.has(e.id) }))
+      }
       const mem = await pool.query(`SELECT room, user_id, name FROM svchat_members WHERE room LIKE 'dm:%'`)
       const last = await pool.query(`SELECT room, MAX(created_at) AS t, COUNT(*) AS n FROM svchat_messages WHERE room LIKE 'dm:%' GROUP BY room`)
       const tmap = new Map(last.rows.map(r => [r.room, { t: r.t, n: r.n }]))
@@ -768,15 +796,17 @@ else{
         if (!byRoom.has(r.room)) byRoom.set(r.room, [])
         byRoom.get(r.room).push({ id: r.user_id, name: r.name })
       }
+      // Берём ВСЕ dm-комнаты из messages (даже без записей участников)
+      for (const r of last.rows) if (!byRoom.has(r.room)) byRoom.set(r.room, [])
       const out = []
       for (const [room, members] of byRoom.entries()) {
-        const hit = members.some(m => String(m.name || '').toLowerCase().includes(needle)) || room.toLowerCase().includes(needle)
+        const hit = !needle || members.some(m => String(m.name || '').toLowerCase().includes(needle)) || (who && who.some(w => room.includes(w.id)))
         if (!hit) continue
         const li = tmap.get(room) || {}
         out.push({ room, members, lastMsg: li.t || null, msgCount: li.n ? Number(li.n) : 0 })
       }
       out.sort((a, b) => String(b.lastMsg || '').localeCompare(String(a.lastMsg || '')))
-      res.end(JSON.stringify({ ok: true, rooms: out }, null, 2))
+      res.end(JSON.stringify({ ok: true, who, rooms: out }, null, 2))
     } catch (e) { res.end(JSON.stringify({ ok: false, error: e.message })) }
   } else if (url === '/ice') {
     const u = process.env.TURN_USERNAME
