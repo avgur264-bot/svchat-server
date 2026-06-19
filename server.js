@@ -752,6 +752,32 @@ else{
     const acc = nick.length >= 2 ? accounts.get(nickKey(nick)) : null
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
     res.end(JSON.stringify(acc ? { ok: true, userId: acc.userId, nick: acc.nick } : { ok: false }))
+  } else if (url === '/_diag_dm') {
+    // ВРЕМЕННО: диагностика расхождения ID в личных чатах. Удалить после использования.
+    await dbReady
+    const q = new URLSearchParams((req.url || '').split('?')[1] || '')
+    const needle = String(q.get('q') || '').trim().toLowerCase()
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+    if (!pool || !needle) { res.end(JSON.stringify({ ok: false, error: 'need ?q=имя и БД' })); return }
+    try {
+      const mem = await pool.query(`SELECT room, user_id, name FROM svchat_members WHERE room LIKE 'dm:%'`)
+      const last = await pool.query(`SELECT room, MAX(created_at) AS t, COUNT(*) AS n FROM svchat_messages WHERE room LIKE 'dm:%' GROUP BY room`)
+      const tmap = new Map(last.rows.map(r => [r.room, { t: r.t, n: r.n }]))
+      const byRoom = new Map()
+      for (const r of mem.rows) {
+        if (!byRoom.has(r.room)) byRoom.set(r.room, [])
+        byRoom.get(r.room).push({ id: r.user_id, name: r.name })
+      }
+      const out = []
+      for (const [room, members] of byRoom.entries()) {
+        const hit = members.some(m => String(m.name || '').toLowerCase().includes(needle)) || room.toLowerCase().includes(needle)
+        if (!hit) continue
+        const li = tmap.get(room) || {}
+        out.push({ room, members, lastMsg: li.t || null, msgCount: li.n ? Number(li.n) : 0 })
+      }
+      out.sort((a, b) => String(b.lastMsg || '').localeCompare(String(a.lastMsg || '')))
+      res.end(JSON.stringify({ ok: true, rooms: out }, null, 2))
+    } catch (e) { res.end(JSON.stringify({ ok: false, error: e.message })) }
   } else if (url === '/ice') {
     const u = process.env.TURN_USERNAME
     const c = process.env.TURN_CREDENTIAL
