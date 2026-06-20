@@ -916,6 +916,14 @@ io.on('connection', (socket) => {
 
     const occupied = roomUsers.has(room) && roomUsers.get(room).size > 0
     let meta = roomMeta.get(room)
+    // Уже подтверждённый участник группы (или админ/владелец) не вводит пароль повторно —
+    // пароль нужен только при ПЕРВОМ входе. Чинит «Неверный пароль» из-за устаревшего
+    // локального пароля после ресинхронизации или смены устройства.
+    const knownMember = !isDm(room) && (
+      (roomMembers.get(room) && roomMembers.get(room).has(String(user.id))) ||
+      (meta && String(meta.adminId) === String(user.id)) ||
+      isOwner(user.id)
+    )
 
     if (isDm(room)) {
       // Личная комната: доступ только двум участникам по их ID, пароли не используются
@@ -929,13 +937,13 @@ io.on('connection', (socket) => {
     } else if (!occupied) {
       const prev = roomMeta.get(room)
       if (prev && prev.password) {
-        if (!(await verifyRoomPass(password, prev.password))) {
+        if (!knownMember && !(await verifyRoomPass(password, prev.password))) {
           socket.emit('join_error', { reason: 'wrong_password' })
           return
         }
         meta = prev
-        // Миграция: если пароль ещё в открытом виде — пересохраняем хешем
-        if (!String(prev.password).startsWith('scrypt$')) {
+        // Миграция: если пароль ещё в открытом виде — пересохраняем хешем (только при наличии введённого пароля)
+        if (password && !String(prev.password).startsWith('scrypt$')) {
           meta.password = await hashPassword(password)
           dbSaveRoom(room, meta)
         }
@@ -945,7 +953,7 @@ io.on('connection', (socket) => {
       }
       roomMeta.set(room, meta)
     } else {
-      if (meta && meta.password && !(await verifyRoomPass(password, meta.password))) {
+      if (!knownMember && meta && meta.password && !(await verifyRoomPass(password, meta.password))) {
         socket.emit('join_error', { reason: 'wrong_password' })
         return
       }
