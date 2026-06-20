@@ -472,6 +472,15 @@ async function verifyPassword(plain, stored) {
   // Совместимость: старые комнаты с паролем в открытом виде
   return stored === plain
 }
+// Вход в КОМНАТУ: принимаем и сам пароль, и его сохранённый хеш.
+// Хеш отдаётся синхронизированным участникам в my_rooms — это их «пропуск».
+// Без этого после потери локального пароля (например, при пересоздании ярлыка/закладки)
+// участник не может войти в свою же закрытую группу.
+async function verifyRoomPass(plain, stored) {
+  if (!stored) return !plain
+  if (plain && plain === stored) return true
+  return verifyPassword(plain, stored)
+}
 function dmMembers(room) {
   const p = String(room).split(':')
   return p.length === 3 && p[1] && p[2] ? [p[1], p[2]] : null
@@ -907,7 +916,7 @@ io.on('connection', (socket) => {
     } else if (!occupied) {
       const prev = roomMeta.get(room)
       if (prev && prev.password) {
-        if (!(await verifyPassword(password, prev.password))) {
+        if (!(await verifyRoomPass(password, prev.password))) {
           socket.emit('join_error', { reason: 'wrong_password' })
           return
         }
@@ -923,7 +932,7 @@ io.on('connection', (socket) => {
       }
       roomMeta.set(room, meta)
     } else {
-      if (meta && meta.password && !(await verifyPassword(password, meta.password))) {
+      if (meta && meta.password && !(await verifyRoomPass(password, meta.password))) {
         socket.emit('join_error', { reason: 'wrong_password' })
         return
       }
