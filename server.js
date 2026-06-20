@@ -76,9 +76,9 @@ const roomReads = new Map()   // room -> Map<userId, ISO-время послед
 const roomDelivs = new Map()  // room -> Map<userId, ISO-время последнего доставленного на устройство>
 const roomUsers = new Map()
 const roomMeta = new Map()
-const userAuth = new Map() // userId -> sha256(token): привязка аккаунта (TOFU), нельзя зайти под чужим ID
+const userAuth = new Map() // userId -> Set<sha256(token)>: привязанные устройства аккаунта (мульти-устройство)
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 166 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 167 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
 const EMPTY_SET = new Set()
@@ -89,8 +89,19 @@ const owners = new Set() // userId владельцев (права админа
 const pubKeys = new Map() // userId -> публичный ключ ECDH (для E2E личных чатов)
 function isOwner(uid){ return !!uid && owners.has(uid) }
 function hashTok(t){ return crypto.createHash('sha256').update(String(t)).digest('hex') }
-// Проверка владения userId по TOFU-токену: если id уже привязан к токену — менять привязку/аккаунт может только владелец токена
-function ownsUid(userId, token){ const claimed = userAuth.get(userId); if (!claimed) return true; return !!token && hashTok(token) === claimed }
+// Мульти-устройство: аккаунт может иметь несколько привязанных токенов (по одному на устройство).
+// Владельцем считается любой, чей токен есть в наборе; если набор пуст — id ещё не занят (TOFU).
+const MAX_DEVICES = 12
+function ownsUid(userId, token){ const set = userAuth.get(userId); if (!set || set.size === 0) return true; return !!token && set.has(hashTok(token)) }
+// Привязать токен устройства к аккаунту (добавляет, не заменяет — чтобы другие устройства не отваливались)
+function addAuth(userId, token){
+  if (!token) return
+  const th = hashTok(token)
+  let set = userAuth.get(userId); if (!set) { set = new Set(); userAuth.set(userId, set) }
+  if (set.has(th)) return
+  if (set.size >= MAX_DEVICES) { const oldest = set.values().next().value; set.delete(oldest); dbDelAuthTok(userId, oldest) }
+  set.add(th); dbSaveAuth(userId, th)
+}
 const accounts = new Map()      // nick_key -> {nick, userId, passHash}: уникальные ники
 const accountByUid = new Map()  // userId -> nick_key
 function nickKey(s){ return String(s || '').trim().toLowerCase() }
@@ -157,8 +168,11 @@ const dbReady = (async () => {
       roomDelivs.get(r.room).set(r.user_id, r.ts)
     }
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_auth (user_id TEXT PRIMARY KEY, token_hash TEXT NOT NULL)`)
-    const authRows = await pool.query(`SELECT user_id, token_hash FROM svchat_auth`)
-    for (const r of authRows.rows) userAuth.set(r.user_id, r.token_hash)
+    // Мульти-устройство: набор токенов на аккаунт. Мигрируем старую одно-токенную таблицу.
+    await pool.query(`CREATE TABLE IF NOT EXISTS svchat_authtok (user_id TEXT NOT NULL, token_hash TEXT NOT NULL, PRIMARY KEY (user_id, token_hash))`)
+    await pool.query(`INSERT INTO svchat_authtok (user_id, token_hash) SELECT user_id, token_hash FROM svchat_auth ON CONFLICT DO NOTHING`)
+    const authRows = await pool.query(`SELECT user_id, token_hash FROM svchat_authtok`)
+    for (const r of authRows.rows) { let s = userAuth.get(r.user_id); if (!s) { s = new Set(); userAuth.set(r.user_id, s) } s.add(r.token_hash) }
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_accounts (nick_key TEXT PRIMARY KEY, nick TEXT NOT NULL, user_id TEXT NOT NULL, pass_hash TEXT NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`)
     const accRows = await pool.query(`SELECT nick_key, nick, user_id, pass_hash FROM svchat_accounts`)
     for (const r of accRows.rows) { accounts.set(r.nick_key, { nick: r.nick, userId: r.user_id, passHash: r.pass_hash }); accountByUid.set(r.user_id, r.nick_key) }
@@ -226,8 +240,12 @@ dbReady.then(ok => { if (ok) setTimeout(() => backfillMembers(), 3000) })
 async function dbSaveAuth(userId, tokenHash) {
   if (!pool) return
   try {
-    await pool.query(`INSERT INTO svchat_auth (user_id, token_hash) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING`, [userId, tokenHash])
+    await pool.query(`INSERT INTO svchat_authtok (user_id, token_hash) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [userId, tokenHash])
   } catch (e) { console.error('[db] auth:', e.message) }
+}
+async function dbDelAuthTok(userId, tokenHash) {
+  if (!pool) return
+  try { await pool.query(`DELETE FROM svchat_authtok WHERE user_id = $1 AND token_hash = $2`, [userId, tokenHash]) } catch (e) { console.error('[db] authtok del:', e.message) }
 }
 async function dbSaveDirRemoved(userId) {
   if (!pool) return
@@ -268,6 +286,7 @@ async function dbDelAccount(key, userId) {
   try {
     await pool.query(`DELETE FROM svchat_accounts WHERE nick_key = $1`, [key])
     await pool.query(`DELETE FROM svchat_auth WHERE user_id = $1`, [userId])
+    await pool.query(`DELETE FROM svchat_authtok WHERE user_id = $1`, [userId])
   } catch (e) { console.error('[db] account del:', e.message) }
 }
 function releaseAccount(uid) {
@@ -627,7 +646,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
   } else if (url === '/diag') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-PgO5/AV+QoR7g255CUmHvKP7owI+80Em5m/U79KXuQg=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-/KZdoWN+N7fN3Uwqavqb+d2lS23Y5tX/GmV6p/Gh7TM=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
     res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SVchat диагностика</title><style>body{font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1020;color:#fff}h1{font-size:19px}#log div{padding:9px 11px;margin:7px 0;border-radius:10px;background:#1b2440;word-break:break-word}.ok{background:#0f5132 !important}.err{background:#842029 !important}.big{font-size:20px;font-weight:700}</style></head><body><h1>SVchat — диагностика связи</h1><div id="log"></div><script src="/socket.io/socket.io.js"></script><script>
 var L=document.getElementById('log');
 function add(t,c){var d=document.createElement('div');d.textContent=t;if(c)d.className=c;L.appendChild(d);}
@@ -697,7 +716,7 @@ else{
     if (myKey && accounts.get(myKey)) {
       const acc = accounts.get(myKey); const passHash = await hashPassword(password)
       acc.passHash = passHash; dbSaveAccount(myKey, acc.nick, userId, passHash)
-      if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+      if (token) addAuth(userId, token)
       res.end(JSON.stringify({ ok: true, userId, nick: acc.nick, changed: true })); return
     }
     const key = nickKey(nick)
@@ -706,7 +725,7 @@ else{
     const passHash = await hashPassword(password)
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
-    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+    if (token) addAuth(userId, token)
     res.end(JSON.stringify({ ok: true, userId, nick }))
   } else if (url === '/pubkey' && req.method === 'POST') {
     const b = await readBody(req)
@@ -818,7 +837,7 @@ else{
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-PgO5/AV+QoR7g255CUmHvKP7owI+80Em5m/U79KXuQg=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-/KZdoWN+N7fN3Uwqavqb+d2lS23Y5tX/GmV6p/Gh7TM=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -883,15 +902,9 @@ io.on('connection', (socket) => {
     // TOFU v2: userId с токеном — проверяем; без токена — генерируем на сервере
     let assignedId = String(p.userId || '').slice(0, 80)
     if (assignedId) {
-      const claimed = userAuth.get(assignedId)
-      if (claimed) {
-        if (!auth || hashTok(auth) !== claimed) { socket.emit('join_error', { reason: 'id_taken' }); return }
-      } else if (auth) {
-        const th = hashTok(auth); userAuth.set(assignedId, th); dbSaveAuth(assignedId, th)
-      } else {
-        // Нет токена — нельзя доверять userId от клиента, генерируем новый
-        assignedId = 'u-' + crypto.randomBytes(12).toString('hex')
-      }
+      if (!ownsUid(assignedId, auth)) { socket.emit('join_error', { reason: 'id_taken' }); return }
+      if (auth) addAuth(assignedId, auth) // привязываем устройство (если ещё нет)
+      else assignedId = 'u-' + crypto.randomBytes(12).toString('hex') // нет токена и id свободен — нельзя доверять, новый гость
     } else {
       assignedId = 'u-' + crypto.randomBytes(12).toString('hex')
     }
@@ -1246,7 +1259,7 @@ io.on('connection', (socket) => {
       } else if (!ownsUid(existing.userId, token)) {
         ack({ ok: false, reason: 'nick_taken' }); return
       }
-      if (token) { const th = hashTok(token); userAuth.set(existing.userId, th); dbSaveAuth(existing.userId, th) }
+      if (token) addAuth(existing.userId, token)
       ack({ ok: true, userId: existing.userId, nick: existing.nick })
       return
     }
@@ -1255,7 +1268,7 @@ io.on('connection', (socket) => {
     const passHash = password ? await hashPassword(password) : ''
     accounts.set(key, { nick, userId, passHash }); accountByUid.set(userId, key)
     dbSaveAccount(key, nick, userId, passHash)
-    if (token) { const th = hashTok(token); userAuth.set(userId, th); dbSaveAuth(userId, th) }
+    if (token) addAuth(userId, token)
     ack({ ok: true, userId, nick, created: true })
   })
 
