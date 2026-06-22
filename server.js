@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> Set<sha256(token)>: привязанные устройства аккаунта (мульти-устройство)
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 181 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 182 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const userPins = new Map() // userId -> Set<room>: закреплённые чаты (синхронизируются между устройствами)
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
@@ -306,6 +306,36 @@ function releaseAccount(uid) {
   if (!key) return
   accounts.delete(key); accountByUid.delete(uid); userAuth.delete(uid)
   dbDelAccount(key, uid)
+}
+// Полное удаление аккаунта (App Store «Удалить аккаунт»): чистим все данные пользователя в БД
+async function dbDeleteUserEverywhere(userId) {
+  if (!pool || !userId) return
+  const tables = ['svchat_keys', 'svchat_hidden', 'svchat_seen', 'svchat_readhide', 'svchat_pins', 'svchat_members', 'svchat_reads', 'svchat_delivs', 'svchat_push']
+  for (const t of tables) {
+    try { await pool.query(`DELETE FROM ${t} WHERE user_id = $1`, [userId]) } catch (e) { console.error(`[db] del ${t}:`, e.message) }
+  }
+}
+// Удаление аккаунта целиком: освобождает ник и стирает все следы пользователя на сервере (память + БД)
+function deleteAccountEverywhere(uid) {
+  uid = String(uid || '')
+  if (!uid) return
+  releaseAccount(uid) // accounts, accountByUid, userAuth + БД (accounts/auth/authtok)
+  pubKeys.delete(uid)
+  userPins.delete(uid)
+  hiddenUsers.delete(uid)
+  readHidden.delete(uid)
+  seenAt.delete(uid)
+  liveOnline.delete(uid)
+  dirRemoved.delete(uid)
+  owners.delete(uid)
+  // Убираем пользователя из всех комнат (списки участников/прочтения/доставки)
+  for (const m of roomMembers.values()) m.delete(uid)
+  for (const m of roomReads.values()) m.delete(uid)
+  for (const m of roomDelivs.values()) m.delete(uid)
+  // Push-подписки этого пользователя
+  const subs = userSubs.get(uid)
+  if (subs) { for (const ep of [...subs.keys()]) { for (const m of pushSubs.values()) m.delete(ep) } userSubs.delete(uid) }
+  dbDeleteUserEverywhere(uid)
 }
 async function dbSaveRoom(room, meta) {
   if (!pool) return
@@ -550,6 +580,57 @@ const appHtmlEtag = appHtml ? '"' + crypto.createHash('sha256').update(appHtml).
 let appHtmlBr = null
 if (appHtml) zlib.brotliCompress(appHtml, { params: { [zlib.constants.BROTLI_PARAM_QUALITY]: 11 } }, (e, out) => { if (!e) appHtmlBr = out })
 
+// Публичная страница политики конфиденциальности (требование App Store). Без изображений и скриптов.
+const PRIVACY_HTML = `<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Политика конфиденциальности — SVchat</title><style>
+:root{color-scheme:light dark}
+body{font:16px/1.6 -apple-system,system-ui,'Segoe UI',Roboto,sans-serif;margin:0;background:#f5f6f8;color:#1c1c1e}
+@media (prefers-color-scheme:dark){body{background:#0b1020;color:#e7e9ee}.card{background:#141a2e !important}a{color:#7aa2ff !important}}
+.wrap{max-width:760px;margin:0 auto;padding:24px 18px 64px}
+.card{background:#fff;border-radius:16px;padding:24px 22px;box-shadow:0 1px 4px rgba(0,0,0,.06)}
+h1{font-size:24px;margin:0 0 6px}
+h2{font-size:18px;margin:26px 0 8px}
+p,li{font-size:15.5px}
+ul{padding-left:22px}
+.muted{color:#8a8f98;font-size:13.5px}
+a{color:#2a6cf6;text-decoration:none}
+a:hover{text-decoration:underline}
+</style></head><body><div class="wrap"><div class="card">
+<h1>Политика конфиденциальности SVchat</h1>
+<p class="muted">Дата вступления в силу: 22 июня 2026 г.</p>
+<p>SVchat — мессенджер для обмена сообщениями, файлами и звонками. Мы уважаем вашу приватность и собираем только те данные, которые необходимы для работы сервиса.</p>
+
+<h2>Какие данные мы обрабатываем</h2>
+<ul>
+<li><strong>Имя (никнейм)</strong> — отображается собеседникам и используется для входа в аккаунт.</li>
+<li><strong>Идентификатор устройства/аккаунта</strong> — анонимный токен, генерируемый на устройстве для привязки аккаунта и синхронизации между устройствами.</li>
+<li><strong>Сообщения и медиафайлы</strong> — хранятся на сервере временно, чтобы доставить их получателю и показать историю чата. Личные чаты защищены сквозным шифрованием (E2E).</li>
+<li><strong>Список чатов и групп</strong>, отметки о прочтении, закреплённые чаты — для синхронизации между вашими устройствами.</li>
+<li><strong>Push-подписка</strong> (если вы разрешили уведомления) — для доставки уведомлений о новых сообщениях.</li>
+</ul>
+<p>Мы <strong>не собираем</strong> номер телефона, email, адресную книгу, геолокацию и не используем рекламные трекеры.</p>
+
+<h2>Как используются данные</h2>
+<p>Данные используются исключительно для работы мессенджера: доставки сообщений, звонков, синхронизации и уведомлений. Мы не продаём и не передаём ваши данные третьим лицам.</p>
+
+<h2>Хранение</h2>
+<p>Сообщения хранятся ограниченное время и автоматически удаляются по мере наполнения истории. Передача данных защищена шифрованием по протоколу HTTPS/WSS.</p>
+
+<h2>Удаление аккаунта</h2>
+<p>Вы можете удалить аккаунт в любой момент: откройте <strong>Настройки → Удалить аккаунт</strong>. При удалении со стороны сервера безвозвратно стираются: ваш никнейм и привязки устройств, ключи шифрования, список и метки чатов, закрепления, push-подписки и участие в группах. Это действие необратимо.</p>
+<p>Если у вас нет доступа к приложению, вы можете запросить удаление, написав нам на адрес ниже.</p>
+
+<h2>Дети</h2>
+<p>Сервис не предназначен для детей младше 13 лет. Мы сознательно не собираем данные таких пользователей.</p>
+
+<h2>Изменения</h2>
+<p>Мы можем обновлять эту политику. Актуальная версия всегда доступна по этому адресу.</p>
+
+<h2>Контакты</h2>
+<p>По вопросам конфиденциальности и удаления данных: <a href="mailto:avgur264@gmail.com">avgur264@gmail.com</a></p>
+
+<p class="muted" style="margin-top:28px">© 2026 SVchat. Все права защищены.</p>
+</div></div></body></html>`
+
 const SW_JS = `
 self.addEventListener('install', e => self.skipWaiting())
 self.addEventListener('activate', e => e.waitUntil(self.clients.claim()))
@@ -658,7 +739,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
   } else if (url === '/diag') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-T3Mhs/1BBFqKdaRBZTrdrmVEUBGIGuJkgjpmUyqwfk4=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-XZn/xGN412jp090YmqKOEkgn/8HTWCeGxx/9hmoMY08=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
     res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SVchat диагностика</title><style>body{font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1020;color:#fff}h1{font-size:19px}#log div{padding:9px 11px;margin:7px 0;border-radius:10px;background:#1b2440;word-break:break-word}.ok{background:#0f5132 !important}.err{background:#842029 !important}.big{font-size:20px;font-weight:700}</style></head><body><h1>SVchat — диагностика связи</h1><div id="log"></div><script src="/socket.io/socket.io.js"></script><script>
 var L=document.getElementById('log');
 function add(t,c){var d=document.createElement('div');d.textContent=t;if(c)d.className=c;L.appendChild(d);}
@@ -739,6 +820,17 @@ else{
     dbSaveAccount(key, nick, userId, passHash)
     if (token) addAuth(userId, token)
     res.end(JSON.stringify({ ok: true, userId, nick }))
+  } else if (url === '/delete_account' && req.method === 'POST') {
+    if (!isTrustedOrigin(req)) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, reason: 'forbidden' })); return }
+    await dbReady
+    const b = await readBody(req)
+    const token = b && b.auth ? String(b.auth).slice(0, 128) : ''
+    const userId = String((b && b.userId) || '').slice(0, 80)
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' })
+    if (!userId) { res.end(JSON.stringify({ ok: false, reason: 'bad_input' })); return }
+    if (!ownsUid(userId, token)) { res.end(JSON.stringify({ ok: false, reason: 'not_owner' })); return }
+    deleteAccountEverywhere(userId)
+    res.end(JSON.stringify({ ok: true, deleted: true }))
   } else if (url === '/pubkey' && req.method === 'POST') {
     const b = await readBody(req)
     const id = String((b && b.id) || '').slice(0, 80)
@@ -846,12 +938,15 @@ else{
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end('{"ok":true}')
+  } else if (url === '/privacy' || url === '/privacy.html') {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=3600', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'" })
+    res.end(PRIVACY_HTML)
   } else if (appHtml) {
     const ae = String(req.headers['accept-encoding'] || '')
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-T3Mhs/1BBFqKdaRBZTrdrmVEUBGIGuJkgjpmUyqwfk4=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-XZn/xGN412jp090YmqKOEkgn/8HTWCeGxx/9hmoMY08=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
