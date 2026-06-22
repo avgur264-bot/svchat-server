@@ -8,6 +8,9 @@ async function seed(context, profile) {
   await context.addInitScript((p) => {
     try {
       localStorage.setItem('chatapp_authed', 'true');
+      // Подавить праздничный оверлей-веху v100 (sv-100-ov): он полноэкранный и
+      // перехватывает клики по полю ввода, ломая realtime-тесты.
+      localStorage.setItem('svchat_v100seen', '1');
       localStorage.setItem('svchat_profile', JSON.stringify({
         name: p.name, color: '#2f6ef0', id: p.id,
         initials: (p.name || 'U').trim().slice(0, 2).toUpperCase()
@@ -37,8 +40,12 @@ async function waitForConnected(page) {
 
 async function sendMessage(page, text) {
   const input = page.getByPlaceholder('Сообщение...');
-  await input.click();
-  await input.fill(text);
+  // Поле ввода может пере-рендериться (React) сразу после входа/подключения,
+  // из-за чего click/fill ловят «element detached». Повторяем через toPass.
+  await expect(async () => {
+    await input.click();
+    await input.fill(text);
+  }).toPass({ timeout: 20000 });
   await input.press('Enter');
 }
 
