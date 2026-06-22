@@ -1,0 +1,9 @@
+{
+  "appId": "ru.svchat.app",
+  "appName": "SVchat",
+  "webDir": "www",
+  "server": {
+    "url": "https://svchat24.ru",
+    "cleartext": false
+  }
+}
