@@ -818,7 +818,9 @@ else{
     await Promise.all(rooms.map(async it => {
       const room = String((it && it.room) || '').slice(0, 64)
       if (!room) return
-      const since = String((it && it.since) || '')
+      let since = String((it && it.since) || '')
+      // Если у клиента нет метки (например, после переустановки) — берём серверную метку прочтения пользователя
+      try { const rd = roomReads.get(room); const sr = rd && rd.get(meId); if (sr && sr > since) since = sr } catch (e) {}
       let count = 0
       if (pool) {
         try {
@@ -1310,7 +1312,9 @@ io.on('connection', (socket) => {
         let peer = ''
         const rec = reg.get(String(peerId)); if (rec && rec.name) peer = rec.name
         if (!peer) { const k = accountByUid.get(peerId); if (k) { const a = accounts.get(k); if (a) peer = a.nick } }
-        rooms.push({ room, dm: 1, peer: peer || 'Личный чат', pass: null })
+        // Призрачный личный чат (собеседник без имени — остаток от старых/дублирующих ID) не показываем
+        if (!peer) continue
+        rooms.push({ room, dm: 1, peer, pass: null })
       } else {
         const meta = roomMeta.get(room)
         rooms.push({ room, pass: (meta && meta.password) ? meta.password : null })
