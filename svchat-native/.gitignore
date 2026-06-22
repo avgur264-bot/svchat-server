@@ -6,3 +6,9 @@ android/app/build/
 android/local.properties
 android/capacitor-cordova-android-plugins/build/
 *.apk
+ios/App/build/
+ios/App/Pods/
+ios/App/DerivedData/
+ios/App/App.xcworkspace/xcuserdata/
+**/xcuserdata/
+*.xcuserstate
