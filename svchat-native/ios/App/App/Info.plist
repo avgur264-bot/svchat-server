@@ -47,5 +47,15 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>SVchat использует камеру для видеозвонков и съёмки фото в чате.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SVchat использует микрофон для голосовых сообщений и аудио-/видеозвонков.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>SVchat сохраняет фото и видео из чата в вашу галерею.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>SVchat использует доступ к фото, чтобы отправлять изображения в чат.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
