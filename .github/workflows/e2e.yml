@@ -20,6 +20,16 @@ jobs:
         run: |
           npm ci || npm install
           npx playwright install --with-deps chromium
+      # Разогрев: будим Render (free-tier засыпает) — иначе тесты падают по таймауту на холодном старте.
+      - name: Warm up server
+        run: |
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 25 https://svchat-server.onrender.com/health || echo 000)
+            echo "ping $i: $code"
+            if [ "$code" = "200" ]; then echo "сервер проснулся"; exit 0; fi
+            sleep 5
+          done
+          echo "разогрев не дождался 200 — продолжаем, тесты сами подождут"
       # Гейт: стабильные smoke-тесты (без WebSocket). Их падение валит сборку.
       - name: Smoke tests (gate)
         working-directory: svchat-e2e
