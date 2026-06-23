@@ -78,7 +78,7 @@ const roomUsers = new Map()
 const roomMeta = new Map()
 const userAuth = new Map() // userId -> Set<sha256(token)>: привязанные устройства аккаунта (мульти-устройство)
 const OWNER_KEY = process.env.OWNER_KEY || '' // секрет владельца (Render env); пусто = функция выключена
-const CLIENT_BUILD = 186 // номер актуальной клиентской сборки (index.html) для авто-обновления
+const CLIENT_BUILD = 187 // номер актуальной клиентской сборки (index.html) для авто-обновления
 const hiddenUsers = new Set() // userId, скрытые из общего справочника
 const userPins = new Map() // userId -> Set<room>: закреплённые чаты (синхронизируются между устройствами)
 const liveOnline = new Map() // userId -> Set(socketId): присутствие в приложении (как в Telegram)
@@ -740,7 +740,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
     res.end(JSON.stringify({ ok: true, online: onlineTotal(), db: !!pool, push: pushEnabled, subs: [...pushSubs.values()].reduce((n, m) => n + m.size, 0) }))
   } else if (url === '/diag') {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-zL1tjpYxSEwLx7l0iePjYzSZoJgG9YdMaC2BtNTwkh0=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-ysf90OVBP7orOkgrFbJZqxTc/XklvryBlx0suf9VrtI=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'unsafe-inline'; connect-src 'self' wss: https: blob: data:" })
     res.end(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SVchat диагностика</title><style>body{font:17px/1.45 -apple-system,system-ui,sans-serif;margin:0;padding:16px;background:#0b1020;color:#fff}h1{font-size:19px}#log div{padding:9px 11px;margin:7px 0;border-radius:10px;background:#1b2440;word-break:break-word}.ok{background:#0f5132 !important}.err{background:#842029 !important}.big{font-size:20px;font-weight:700}</style></head><body><h1>SVchat — диагностика связи</h1><div id="log"></div><script src="/socket.io/socket.io.js"></script><script>
 var L=document.getElementById('log');
 function add(t,c){var d=document.createElement('div');d.textContent=t;if(c)d.className=c;L.appendChild(d);}
@@ -947,7 +947,7 @@ else{
     if (appHtmlEtag && req.headers['if-none-match'] === appHtmlEtag) {
       res.writeHead(304, { 'ETag': appHtmlEtag, 'Cache-Control': 'no-cache' }); res.end(); return
     }
-    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-zL1tjpYxSEwLx7l0iePjYzSZoJgG9YdMaC2BtNTwkh0=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
+    const h = { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'ETag': appHtmlEtag, 'Vary': 'Accept-Encoding', 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'SAMEORIGIN', 'Content-Security-Policy': "default-src 'self'; script-src 'self' 'sha256-ysf90OVBP7orOkgrFbJZqxTc/XklvryBlx0suf9VrtI=' 'sha256-Teo6bznhpC673bmFeNM+9sYI/kpWB9hnLsujc8XF8wo=' 'sha256-EPWGZOZfEBu49JDq/HQJ4LoLtGdLiVqUMs3AbSFQ+aY=' 'sha256-O2f3zsK7kBCYSt0KF3+gEirrV/EXQXpmtibD5mWOeEA=' 'sha256-RrJCSws2CH5usRS3o35JllpWHU18qUVj9FawGU7R+gg='; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' wss: https: blob: data:; font-src 'self' data: https://cdn.jsdelivr.net https://fonts.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'" }
     if (appHtmlBr && /\bbr\b/.test(ae)) {
       h['Content-Encoding'] = 'br'
       res.writeHead(200, h); res.end(appHtmlBr)
@@ -1351,7 +1351,7 @@ io.on('connection', (socket) => {
       from: me.id,
       fromName: me.name,
       msgType: 'poll',
-      poll: { question, options, votes, multi: true },
+      poll: { question, options, votes, multi: p.multi === true },
       time: new Date().toISOString(),
     }
     const h = getHistory(currentRoom)
@@ -1375,8 +1375,20 @@ io.on('connection', (socket) => {
     const arr = poll.votes[optIdx]
     const uid = String(me.id)
     const i = arr.indexOf(uid)
-    if (i >= 0) arr.splice(i, 1)   // снять голос
-    else arr.push(uid)             // поставить (мультивыбор: другие не снимаем)
+    if (i >= 0) {
+      arr.splice(i, 1) // снять голос
+    } else {
+      if (!poll.multi) {
+        // одиночный выбор: снять голос со всех других вариантов
+        Object.keys(poll.votes).forEach(k => {
+          if (k !== optIdx) {
+            const j = poll.votes[k].indexOf(uid)
+            if (j >= 0) poll.votes[k].splice(j, 1)
+          }
+        })
+      }
+      arr.push(uid)
+    }
     dbUpdateMsg(currentRoom, entry)
     io.to(currentRoom).emit('poll_voted', { id, votes: poll.votes })
   })
@@ -1669,5 +1681,5 @@ const SELF_URL = (process.env.RENDER_EXTERNAL_URL || 'https://svchat-server.onre
 setInterval(() => { fetch(SELF_URL + '/health').catch(() => {}) }, 10 * 60 * 1000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v186: опросы в группах) :' + PORT)
+  console.log('SVchat server (v187: одиночный/мультивыбор в опросах) :' + PORT)
 })
