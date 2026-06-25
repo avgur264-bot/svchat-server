@@ -125,6 +125,38 @@ if (DB_URL) {
   console.log('[db] DATABASE_URL не задан — режим памяти (история сотрётся при деплое)')
 }
 
+// ── S3-хранилище медиа (Timeweb S3 / любой S3-совместимый) ───────────────────
+// Если переменные не заданы — медиа хранится в базе как раньше.
+let s3 = null
+const S3_BUCKET = process.env.S3_BUCKET || ''
+if (process.env.S3_ENDPOINT && S3_BUCKET && process.env.S3_ACCESS_KEY && process.env.S3_SECRET_KEY) {
+  try {
+    const { S3Client } = require('@aws-sdk/client-s3')
+    s3 = new S3Client({
+      endpoint: process.env.S3_ENDPOINT,
+      region: process.env.S3_REGION || 'ru-1',
+      forcePathStyle: true,
+      credentials: { accessKeyId: process.env.S3_ACCESS_KEY, secretAccessKey: process.env.S3_SECRET_KEY },
+    })
+    console.log('[s3] медиа-хранилище включено:', process.env.S3_ENDPOINT, '/', S3_BUCKET)
+  } catch (e) { s3 = null; console.error('[s3] модуль недоступен:', e.message) }
+} else {
+  console.log('[s3] не настроен — медиа в базе (задайте S3_ENDPOINT/S3_BUCKET/S3_ACCESS_KEY/S3_SECRET_KEY)')
+}
+// Залить dataUrl-строку в S3, вернуть ключ объекта
+async function s3Put(dataUrl) {
+  const { PutObjectCommand } = require('@aws-sdk/client-s3')
+  const key = 'media/' + Date.now() + '-' + Math.random().toString(36).slice(2, 10)
+  await s3.send(new PutObjectCommand({ Bucket: S3_BUCKET, Key: key, Body: dataUrl, ContentType: 'text/plain' }))
+  return key
+}
+// Скачать по ключу, вернуть dataUrl-строку
+async function s3Get(key) {
+  const { GetObjectCommand } = require('@aws-sdk/client-s3')
+  const r = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: String(key) }))
+  return await r.Body.transformToString()
+}
+
 const dbReady = (async () => {
   if (!pool) return false
   try {
@@ -495,9 +527,10 @@ function broadcastPresenceToDms(uid) {
 
 const HISTORY_INIT = 30 // сколько сообщений отдаём при входе
 function liteEntry(e) {
-  if (!e || !e.dataUrl) return e
+  if (!e || (!e.dataUrl && !e.s3)) return e
   const c = Object.assign({}, e)
   delete c.dataUrl
+  delete c.s3
   c.media = 1
   return c
 }
@@ -1167,7 +1200,12 @@ io.on('connection', (socket) => {
     }
     io.to(currentRoom).emit('message', { message: entry })
     if (typeof ack === 'function') ack({ ok: true })
-    dbSaveMsg(currentRoom, entry)
+    // Медиа — в S3 (если настроен): в базе храним только ключ, не base64
+    const _room = currentRoom
+    ;(async () => {
+      try { if (entry.dataUrl && s3) entry.s3 = await s3Put(entry.dataUrl) } catch (e) { console.error('[s3] put:', e.message) }
+      dbSaveMsg(_room, entry.s3 ? Object.assign({}, entry, { dataUrl: undefined }) : entry)
+    })()
 
     // Push тем, у кого приложение закрыто
     if (isDm(currentRoom)) {
@@ -1230,8 +1268,12 @@ io.on('connection', (socket) => {
     const entry = getHistory(currentRoom).find(e => e.id === id)
     if (entry && entry.dataUrl) { ack({ ok: true, dataUrl: entry.dataUrl }); return }
     const fromDb = await dbGetMsg(currentRoom, id) // вытеснено из памяти — берём из базы
-    if (fromDb && fromDb.dataUrl) ack({ ok: true, dataUrl: fromDb.dataUrl })
-    else ack({ ok: false })
+    if (fromDb && fromDb.dataUrl) { ack({ ok: true, dataUrl: fromDb.dataUrl }); return } // старое медиа (в базе)
+    const s3key = (fromDb && fromDb.s3) || (entry && entry.s3) // новое медиа — в S3
+    if (s3key && s3) {
+      try { ack({ ok: true, dataUrl: await s3Get(s3key) }); return } catch (e) { console.error('[s3] get:', e.message) }
+    }
+    ack({ ok: false })
   })
 
   // Догрузка более ранних сообщений (пагинация вверх)
