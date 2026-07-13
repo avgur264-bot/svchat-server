@@ -163,13 +163,14 @@ const dbReady = (async () => {
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_rooms (
       room TEXT PRIMARY KEY, password TEXT, admin_id TEXT, created_at TIMESTAMPTZ DEFAULT now())`)
     await pool.query(`ALTER TABLE svchat_rooms ADD COLUMN IF NOT EXISTS pinned_id TEXT`)
+    await pool.query(`ALTER TABLE svchat_rooms ADD COLUMN IF NOT EXISTS avatar TEXT`)
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_messages (
       id TEXT PRIMARY KEY, room TEXT NOT NULL, entry JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT now())`)
     await pool.query(`CREATE INDEX IF NOT EXISTS svchat_messages_room_idx ON svchat_messages (room, created_at)`)
     await pool.query(`CREATE TABLE IF NOT EXISTS svchat_push (
       endpoint TEXT PRIMARY KEY, room TEXT NOT NULL, user_id TEXT, sub JSONB NOT NULL)`)
-    const rooms = await pool.query(`SELECT room, password, admin_id, pinned_id FROM svchat_rooms`)
-    for (const r of rooms.rows) roomMeta.set(r.room, { password: r.password, adminId: r.admin_id, pinnedId: r.pinned_id || null })
+    const rooms = await pool.query(`SELECT room, password, admin_id, pinned_id, avatar FROM svchat_rooms`)
+    for (const r of rooms.rows) roomMeta.set(r.room, { password: r.password, adminId: r.admin_id, pinnedId: r.pinned_id || null, avatar: r.avatar || null })
     const subs = await pool.query(`SELECT endpoint, room, user_id, sub FROM svchat_push`)
     for (const r of subs.rows) {
       if (!pushSubs.has(r.room)) pushSubs.set(r.room, new Map())
@@ -374,9 +375,9 @@ async function dbSaveRoom(room, meta) {
   if (!pool) return
   try {
     await pool.query(
-      `INSERT INTO svchat_rooms (room, password, admin_id, pinned_id) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (room) DO UPDATE SET password = EXCLUDED.password, admin_id = EXCLUDED.admin_id, pinned_id = EXCLUDED.pinned_id`,
-      [room, meta.password || null, meta.adminId || null, meta.pinnedId || null])
+      `INSERT INTO svchat_rooms (room, password, admin_id, pinned_id, avatar) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (room) DO UPDATE SET password = EXCLUDED.password, admin_id = EXCLUDED.admin_id, pinned_id = EXCLUDED.pinned_id, avatar = EXCLUDED.avatar`,
+      [room, meta.password || null, meta.adminId || null, meta.pinnedId || null, meta.avatar || null])
   } catch (e) { console.error('[db] комната:', e.message) }
 }
 const PRUNE_EVERY = 25 // как часто (раз в N вставок на комнату) подчищать старые сообщения
@@ -1139,6 +1140,7 @@ io.on('connection', (socket) => {
     touchMember(room, me)
 
     socket.emit('joined', { room, id: me.id, isAdmin: (!!(meta && meta.adminId === me.id)) || isOwner(me.id), locked: !!(meta && meta.password), pinnedId: (meta && meta.pinnedId) || null })
+    if (!isDm(room) && meta && meta.avatar) socket.emit('room_avatar', { room, avatar: meta.avatar }) // картинка группы тем, кто зашёл
     socket.emit('history', { messages: h.slice(-HISTORY_INIT).map(liteEntry), more: h.length > HISTORY_INIT })
     const rd = roomReads.get(room)
     let rdOut = {}
@@ -1708,6 +1710,10 @@ io.on('connection', (socket) => {
     const isAdmin = (meta && meta.adminId === me.id) || isOwner(me.id)
     if (!isAdmin) return // только админ
     const avatar = p.avatar && typeof p.avatar === 'string' && p.avatar.startsWith('data:image/') && p.avatar.length < 500000 ? p.avatar : null
+    const m = meta || { password: null, adminId: me.id }
+    m.avatar = avatar
+    roomMeta.set(currentRoom, m)
+    dbSaveRoom(currentRoom, m) // сохраняем — переживёт перезагрузку и видно тем, кто зайдёт позже
     io.to(currentRoom).emit('room_avatar', { room: currentRoom, avatar })
   })
 
@@ -1752,5 +1758,5 @@ const SELF_URL = (process.env.RENDER_EXTERNAL_URL || 'https://svchat-server.onre
 setInterval(() => { fetch(SELF_URL + '/health').catch(() => {}) }, 10 * 60 * 1000)
 
 server.listen(PORT, () => {
-  console.log('SVchat server (v198: экономия TURN — кап разрешения 480p и битрейта видео ~600 кбит/с) :' + PORT)
+  console.log('SVchat server (v198: экономия TURN + сохранение картинки группы) :' + PORT)
 })
